@@ -25,6 +25,7 @@ jobs:
   #     exclude_archs: "windows_amd64_rtools"
 
   duckdb-stable-build:
+    if: github.ref == 'main'
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
@@ -33,3 +34,15 @@ jobs:
       extension_name: lindel
       enable_rust: true
       exclude_archs: "windows_amd64_rtools;wasm_mvp;wasm_eh;wasm_threads"
+
+  duckdb-stable-build-v1_3:
+    if: github.ref == 'v1.3'
+    name: Build extension binaries for 1.3
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    with:
+      duckdb_version: v1.3-ossivalis
+      ci_tools_version: main
+      extension_name: lindel
+      enable_rust: true
+      exclude_archs: "windows_amd64_rtools;wasm_mvp;wasm_eh;wasm_threads"
+

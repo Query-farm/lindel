@@ -7,7 +7,6 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/main/extension_util.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
 // Include the declarations of things from Rust.
@@ -768,7 +767,7 @@ namespace duckdb
     }
 
     // Extension initalization.
-    static void LoadInternal(DatabaseInstance &instance)
+    static void LoadInternal(ExtensionLoader &loader)
     {
         ScalarFunctionSet hilbert_encode("hilbert_encode");
         ScalarFunctionSet morton_encode("morton_encode");
@@ -778,8 +777,8 @@ namespace duckdb
         hilbert_encode.AddFunction(SF({LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid())}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
         morton_encode.AddFunction(SF({LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid())}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
 
-        ExtensionUtil::RegisterFunction(instance, hilbert_encode);
-        ExtensionUtil::RegisterFunction(instance, morton_encode);
+        loader.RegisterFunction(hilbert_encode);
+        loader.RegisterFunction(morton_encode);
 
         ScalarFunctionSet hilbert_decode = ScalarFunctionSet("hilbert_decode");
         ScalarFunctionSet morton_decode = ScalarFunctionSet("morton_decode");
@@ -804,13 +803,13 @@ namespace duckdb
                                lindelDecodeToArrayBind));
         }
 
-        ExtensionUtil::RegisterFunction(instance, hilbert_decode);
-        ExtensionUtil::RegisterFunction(instance, morton_decode);
+        loader.RegisterFunction(hilbert_decode);
+        loader.RegisterFunction(morton_decode);
     }
 
-    void LindelExtension::Load(DuckDB &db)
+    void LindelExtension::Load(ExtensionLoader &loader)
     {
-        LoadInternal(*db.instance);
+        LoadInternal(loader);
     }
     std::string LindelExtension::Name()
     {
@@ -819,11 +818,7 @@ namespace duckdb
 
     std::string LindelExtension::Version() const
     {
-#ifdef EXT_VERSION_QUACK
-        return EXT_VERSION_QUACK;
-#else
-        return "";
-#endif
+        return "1.0.2";
     }
 
 } // namespace duckdb
@@ -831,18 +826,8 @@ namespace duckdb
 extern "C"
 {
 
-    DUCKDB_EXTENSION_API void lindel_init(duckdb::DatabaseInstance &db)
+    DUCKDB_CPP_EXTENSION_ENTRY(lindel, loader)
     {
-        duckdb::DuckDB db_wrapper(db);
-        db_wrapper.LoadExtension<duckdb::LindelExtension>();
-    }
-
-    DUCKDB_EXTENSION_API const char *lindel_version()
-    {
-        return "1.0.1";
+        duckdb::LoadInternal(loader);
     }
 }
-
-#ifndef DUCKDB_EXTENSION_MAIN
-#error DUCKDB_EXTENSION_MAIN not defined
-#endif
