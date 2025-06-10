@@ -1,12 +1,6 @@
 name: Scheduled Trigger for 1.3
 
 on:
-  push:
-    branches:
-      - v1.3
-  pull_request:
-    branches:
-      - v1.3
   schedule:
     - cron: '0 12 * * *'  # Runs at 12:00 UTC every day
   workflow_dispatch:  # Allows manual trigger
@@ -30,4 +24,4 @@ jobs:
 
       - name: Trigger Workflow on my-branch
         run: |
-          gh workflow run MainDistributionPipeline_v1.3.yml --ref v1.3
+          gh workflow run MainDistributionPipeline.yml --ref v1.3
