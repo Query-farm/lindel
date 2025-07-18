@@ -210,119 +210,163 @@ namespace duckdb
         return bind_data;
     }
 
-    // This function performs the actual decoding of values as a DuckDB scalar function.
-    //
-    inline void lindelDecodeArrayFun(DataChunk &args, ExpressionState &state, Vector &result)
+    // Struct to hold input data information
+    struct DecodeInputDataInfo
     {
-        // This is the number of elements in the output array, not the number of rows being procssed.
-        auto output_number_of_elements = ArrayType::GetSize(result.GetType());
+        void *data_ptr;
+        size_t increment;
 
-        // The type of the elements in the output array this will either be an integer type or a float type.
-        auto output_child_type = ArrayType::GetChildType(result.GetType());
+        DecodeInputDataInfo(void *ptr, size_t inc) : data_ptr(ptr), increment(inc) {}
+    };
 
-        // Get a reference to the bind data that was already created that will determine the type
-        // of encoding to use.
-        auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-        auto &bind_info = func_expr.bind_info->Cast<lindelEncodingBindData>();
+    // Struct to hold output data information
+    struct DecodeOutputDataInfo
+    {
+        void *data_ptr;
+        size_t increment;
+        uint8_t bit_width;
 
-        // Reference the source data.
-        auto left = args.data[0];
+        DecodeOutputDataInfo(void *ptr, size_t inc, uint8_t width)
+            : data_ptr(ptr), increment(inc), bit_width(width) {}
+    };
 
-        // Standardize the vectors to a unified format, so it can be iterated.
-        UnifiedVectorFormat left_format;
-        left.ToUnifiedFormat(args.size(), left_format);
+    // Helper function to get input data pointer and increment size
+    inline DecodeInputDataInfo getDecodeInputDataInfo(Vector &input_vector)
+    {
+        void *data_ptr = NULL;
+        size_t increment = 0;
 
-        // Since this function can take a variety of input types with different sizes, get different
-        // pointers to the different data types of the input.
-        auto left_data_8 = FlatVector::GetData<uint8_t>(left);
+        switch (input_vector.GetType().id())
+        {
+        case LogicalTypeId::UTINYINT:
+            data_ptr = FlatVector::GetData<uint8_t>(input_vector);
+            increment = sizeof(uint8_t);
+            break;
+        case LogicalTypeId::TINYINT:
+            data_ptr = FlatVector::GetData<int8_t>(input_vector);
+            increment = sizeof(int8_t);
+            break;
+        case LogicalTypeId::USMALLINT:
+            data_ptr = FlatVector::GetData<uint16_t>(input_vector);
+            increment = sizeof(uint16_t);
+            break;
+        case LogicalTypeId::SMALLINT:
+            data_ptr = FlatVector::GetData<int16_t>(input_vector);
+            increment = sizeof(int16_t);
+            break;
+        case LogicalTypeId::UINTEGER:
+            data_ptr = FlatVector::GetData<uint32_t>(input_vector);
+            increment = sizeof(uint32_t);
+            break;
+        case LogicalTypeId::INTEGER:
+            data_ptr = FlatVector::GetData<int32_t>(input_vector);
+            increment = sizeof(int32_t);
+            break;
+        case LogicalTypeId::UBIGINT:
+            data_ptr = FlatVector::GetData<uint64_t>(input_vector);
+            increment = sizeof(uint64_t);
+            break;
+        case LogicalTypeId::BIGINT:
+            data_ptr = FlatVector::GetData<int64_t>(input_vector);
+            increment = sizeof(int64_t);
+            break;
+        case LogicalTypeId::UHUGEINT:
+            data_ptr = FlatVector::GetData<uhugeint_t>(input_vector);
+            increment = sizeof(uhugeint_t);
+            break;
+        case LogicalTypeId::HUGEINT:
+            data_ptr = FlatVector::GetData<hugeint_t>(input_vector);
+            increment = sizeof(hugeint_t);
+            break;
+        default:
+            throw NotImplementedException("hilbert_decode()/morton_decode() only supports integer input types");
+        }
 
-        // So the output type changes based on the number of inputs and the type of inputs.
+        return DecodeInputDataInfo(data_ptr, increment);
+    }
 
-        // Get the reference to the children of the result.
+    // Helper function to get output data pointer, increment size, and bit width
+    inline DecodeOutputDataInfo getDecodeOutputDataInfo(Vector &result, const LogicalType &output_child_type)
+    {
         auto &result_data_children = ArrayVector::GetEntry(result);
-
-        // Since this function can produce a variety of output types with different sizes follow
-        // the same pattern that was used for the input types.  All of these are just pointers.
-        auto result_data_u8 = FlatVector::GetData<uint8_t>(result_data_children);
-
-        uint8_t output_element_bit_width;
+        void *data_ptr = NULL;
+        size_t increment = 0;
+        uint8_t bit_width = 0;
 
         switch (output_child_type.id())
         {
         case LogicalTypeId::UTINYINT:
+            data_ptr = FlatVector::GetData<uint8_t>(result_data_children);
+            increment = sizeof(uint8_t);
+            bit_width = 8;
+            break;
         case LogicalTypeId::TINYINT:
-        {
-            output_element_bit_width = 8;
-        }
-        break;
+            data_ptr = FlatVector::GetData<int8_t>(result_data_children);
+            increment = sizeof(int8_t);
+            bit_width = 8;
+            break;
         case LogicalTypeId::USMALLINT:
+            data_ptr = FlatVector::GetData<uint16_t>(result_data_children);
+            increment = sizeof(uint16_t);
+            bit_width = 16;
+            break;
         case LogicalTypeId::SMALLINT:
-        {
-            output_element_bit_width = 16;
-        }
-        break;
+            data_ptr = FlatVector::GetData<int16_t>(result_data_children);
+            increment = sizeof(int16_t);
+            bit_width = 16;
+            break;
         case LogicalTypeId::UINTEGER:
+            data_ptr = FlatVector::GetData<uint32_t>(result_data_children);
+            increment = sizeof(uint32_t);
+            bit_width = 32;
+            break;
         case LogicalTypeId::INTEGER:
+            data_ptr = FlatVector::GetData<int32_t>(result_data_children);
+            increment = sizeof(int32_t);
+            bit_width = 32;
+            break;
         case LogicalTypeId::FLOAT:
-        {
-            output_element_bit_width = 32;
-        }
-        break;
+            data_ptr = FlatVector::GetData<float>(result_data_children);
+            increment = sizeof(float);
+            bit_width = 32;
+            break;
         case LogicalTypeId::UBIGINT:
+            data_ptr = FlatVector::GetData<uint64_t>(result_data_children);
+            increment = sizeof(uint64_t);
+            bit_width = 64;
+            break;
         case LogicalTypeId::BIGINT:
+            data_ptr = FlatVector::GetData<int64_t>(result_data_children);
+            increment = sizeof(int64_t);
+            bit_width = 64;
+            break;
         case LogicalTypeId::DOUBLE:
-        {
-            output_element_bit_width = 64;
-        }
-        break;
+            data_ptr = FlatVector::GetData<double>(result_data_children); // Fixed: was int64_t
+            increment = sizeof(double);
+            bit_width = 64;
+            break;
         case LogicalTypeId::UHUGEINT:
+            data_ptr = FlatVector::GetData<uhugeint_t>(result_data_children);
+            increment = sizeof(uhugeint_t);
+            bit_width = 128;
+            break;
         case LogicalTypeId::HUGEINT:
-        {
-            output_element_bit_width = 128;
-        }
-        break;
+            data_ptr = FlatVector::GetData<hugeint_t>(result_data_children);
+            increment = sizeof(hugeint_t);
+            bit_width = 128;
+            break;
         default:
-            throw NotImplementedException("hilbert_decode()/morton_decode() only supports destination types of UTINYINT, USMALLINT, UINTEGER, UBIGINT, UHUGEINT types");
-        }
-        size_t input_pointer_increment;
-        switch (left.GetType().id())
-        {
-        case LogicalTypeId::UTINYINT:
-        case LogicalTypeId::TINYINT:
-        {
-            input_pointer_increment = 1;
-        }
-        break;
-        case LogicalTypeId::USMALLINT:
-        case LogicalTypeId::SMALLINT:
-        {
-            input_pointer_increment = 2;
-        }
-        break;
-        case LogicalTypeId::UINTEGER:
-        case LogicalTypeId::INTEGER:
-        {
-            input_pointer_increment = 4;
-        }
-        break;
-        case LogicalTypeId::UBIGINT:
-        case LogicalTypeId::BIGINT:
-        {
-            input_pointer_increment = 8;
-        }
-        break;
-        case LogicalTypeId::UHUGEINT:
-        case LogicalTypeId::HUGEINT:
-        {
-            input_pointer_increment = 16;
-        }
-        break;
-        default:
-            throw NotImplementedException("hilbert_decode()/morton_decode() only supports incoming sources of UTINYINT, USMALLINT, UINTEGER, UBIGINT, UHUGEINT types");
+            throw NotImplementedException("hilbert_decode()/morton_decode() only supports specified output types");
         }
 
-        const size_t output_pointer_increment = output_element_bit_width / 8;
+        return DecodeOutputDataInfo(data_ptr, increment, bit_width);
+    }
 
+    // Helper function to process all rows
+    inline void decodeRows(const DataChunk &args, const UnifiedVectorFormat &left_format,
+                           const lindelEncodingBindData &bind_info, const DecodeInputDataInfo &input_info,
+                           const DecodeOutputDataInfo &output_info, idx_t output_number_of_elements, Vector &result)
+    {
         for (idx_t i = 0; i < args.size(); i++)
         {
             auto left_idx = left_format.sel->get_index(i);
@@ -334,19 +378,48 @@ namespace duckdb
                 continue;
             }
 
-            // Get the offset of where the result for this row should begin, since
-            // there is always a fixed number of result elements, its pretty simple.
+            // Calculate memory locations for this row
             auto result_offset = i * output_number_of_elements;
+            void *output_location = (char *)output_info.data_ptr + result_offset * output_info.increment;
+            void *source_location = (char *)input_info.data_ptr + left_idx * input_info.increment;
 
-            // Depending on the output type call the appropriate decode function with the appropriate
-            // result location.
-
-            void *output_location = result_data_u8 + result_offset * output_pointer_increment;
-            void *source_location = left_data_8 + (left_idx * input_pointer_increment);
-
-            perform_decode(bind_info.encoding_type, output_element_bit_width, source_location, output_location, output_number_of_elements);
+            // Perform the actual decoding
+            perform_decode(bind_info.encoding_type, output_info.bit_width, source_location,
+                           output_location, output_number_of_elements);
         }
+    }
 
+    // This function performs the actual decoding of values as a DuckDB scalar function.
+    //
+    inline void lindelDecodeArrayFun(DataChunk &args, ExpressionState &state, Vector &result)
+    {
+        // This is the number of elements in the output array, not the number of rows being processed.
+        auto output_number_of_elements = ArrayType::GetSize(result.GetType());
+
+        // The type of the elements in the output array this will either be an integer type or a float type.
+        auto output_child_type = ArrayType::GetChildType(result.GetType());
+
+        // Get a reference to the bind data that was already created that will determine the type
+        // of encoding to use.
+        auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+        auto &bind_info = func_expr.bind_info->Cast<lindelEncodingBindData>();
+
+        // Reference the source data.
+        auto &left = args.data[0];
+
+        // Standardize the vectors to a unified format, so it can be iterated.
+        UnifiedVectorFormat left_format;
+        left.ToUnifiedFormat(args.size(), left_format);
+
+        // Get typed pointers and metadata for input and output
+        DecodeInputDataInfo input_info = getDecodeInputDataInfo(left);
+        DecodeOutputDataInfo output_info = getDecodeOutputDataInfo(result, output_child_type);
+
+        // Process each row
+        decodeRows(args, left_format, bind_info, input_info, output_info,
+                   output_number_of_elements, result);
+
+        // Optimize for single-element case
         if (args.size() == 1)
         {
             result.SetVectorType(VectorType::CONSTANT_VECTOR);
@@ -542,21 +615,6 @@ namespace duckdb
 
         left.ToUnifiedFormat(args.size(), left_format);
 
-        // Need the different input types since we're doing pointer math below.
-        auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
-        auto left_data_16 = FlatVector::GetData<int16_t>(left_child);
-        auto left_data_32 = FlatVector::GetData<int32_t>(left_child);
-        auto left_data_64 = FlatVector::GetData<int64_t>(left_child);
-        auto left_data_float = FlatVector::GetData<float_t>(left_child);
-        auto left_data_double = FlatVector::GetData<double_t>(left_child);
-
-        // So the output type changes based on the number of inputs and the type of inputs.
-        auto result_data_u8 = FlatVector::GetData<uint8_t>(result);
-        auto result_data_u16 = FlatVector::GetData<uint16_t>(result);
-        auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
-        auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
-        auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
-
         for (idx_t i = 0; i < args.size(); i++)
         {
             auto left_idx = left_format.sel->get_index(i);
@@ -581,11 +639,17 @@ namespace duckdb
                 {
                 case 1:
                 {
+                    auto left_data_double = FlatVector::GetData<double_t>(left_child);
+                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+
                     encoder((uint64_t *)(left_data_double + left_offset), array_number_of_elements, result_data_u64 + i);
                     break;
                 }
                 case 2:
                 {
+                    auto left_data_double = FlatVector::GetData<double_t>(left_child);
+                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+
                     encoder((uint64_t *)(left_data_double + left_offset), array_number_of_elements, result_data_u128 + i);
                     break;
                 }
@@ -602,17 +666,26 @@ namespace duckdb
                 {
                 case 1:
                 {
+                    auto left_data_float = FlatVector::GetData<float_t>(left_child);
+                    auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
+
                     encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u32 + i);
                     break;
                 }
                 case 2:
                 case 3:
                 {
+                    auto left_data_float = FlatVector::GetData<float_t>(left_child);
+                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+
                     encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u64 + i);
                     break;
                 }
                 case 4:
                 {
+                    auto left_data_float = FlatVector::GetData<float_t>(left_child);
+                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+
                     hilbert_encode_u32_var((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u128 + i);
                     break;
                 }
@@ -629,11 +702,17 @@ namespace duckdb
                 {
                 case 1:
                 {
+                    auto left_data_64 = FlatVector::GetData<int64_t>(left_child);
+                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+
                     encoder((uint64_t *)(left_data_64 + left_offset), array_number_of_elements, result_data_u64 + i);
                     break;
                 }
                 case 2:
                 {
+                    auto left_data_64 = FlatVector::GetData<int64_t>(left_child);
+                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+
                     encoder((uint64_t *)(left_data_64 + left_offset), array_number_of_elements, result_data_u128 + i);
                     break;
                 }
@@ -652,17 +731,26 @@ namespace duckdb
                 {
                 case 1:
                 {
+                    auto left_data_32 = FlatVector::GetData<int32_t>(left_child);
+                    auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
+
                     encoder((uint32_t *)(left_data_32 + left_offset), array_number_of_elements, result_data_u32 + i);
                     break;
                 }
                 case 2:
                 case 3:
                 {
+                    auto left_data_32 = FlatVector::GetData<int32_t>(left_child);
+                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+
                     encoder((uint32_t *)(left_data_32 + left_offset), array_number_of_elements, result_data_u64 + i);
                     break;
                 }
                 case 4:
                 {
+                    auto left_data_32 = FlatVector::GetData<int32_t>(left_child);
+                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+
                     encoder((uint32_t *)(left_data_32 + left_offset), array_number_of_elements, result_data_u128 + i);
                     break;
                 }
@@ -680,17 +768,26 @@ namespace duckdb
                 {
                 case 1:
                 {
+                    auto left_data_16 = FlatVector::GetData<int16_t>(left_child);
+                    auto result_data_u16 = FlatVector::GetData<uint16_t>(result);
+
                     encoder((uint16_t *)(left_data_16 + left_offset), array_number_of_elements, result_data_u16 + i);
                     break;
                 }
                 case 2:
                 {
+                    auto left_data_16 = FlatVector::GetData<int16_t>(left_child);
+                    auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
+
                     encoder((uint16_t *)(left_data_16 + left_offset), array_number_of_elements, result_data_u32 + i);
                     break;
                 }
                 case 3:
                 case 4:
                 {
+                    auto left_data_16 = FlatVector::GetData<int16_t>(left_child);
+                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+
                     encoder((uint16_t *)(left_data_16 + left_offset), array_number_of_elements, result_data_u64 + i);
                     break;
                 }
@@ -699,6 +796,9 @@ namespace duckdb
                 case 7:
                 case 8:
                 {
+                    auto left_data_16 = FlatVector::GetData<int16_t>(left_child);
+                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+
                     encoder((uint16_t *)(left_data_16 + left_offset), array_number_of_elements, result_data_u128 + i);
                     break;
                 }
@@ -716,17 +816,26 @@ namespace duckdb
                 {
                 case 1:
                 {
+                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
+                    auto result_data_u8 = FlatVector::GetData<uint8_t>(result);
+
                     encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u8 + i);
                     break;
                 }
                 case 2:
                 {
+                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
+                    auto result_data_u16 = FlatVector::GetData<uint16_t>(result);
+
                     encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u16 + i);
                     break;
                 }
                 case 3:
                 case 4:
                 {
+                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
+                    auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
+
                     encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u32 + i);
                     break;
                 }
@@ -735,6 +844,9 @@ namespace duckdb
                 case 7:
                 case 8:
                 {
+                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
+                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+
                     encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u64 + i);
                     break;
                 }
@@ -747,6 +859,9 @@ namespace duckdb
                 case 15:
                 case 16:
                 {
+                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
+                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+
                     encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u128 + i);
                     break;
                 }
