@@ -11,7 +11,7 @@
 
 // Include the declarations of things from Rust.
 #include "rust.h"
-
+#include "query_farm_telemetry.hpp"
 namespace duckdb
 {
 
@@ -920,6 +920,8 @@ namespace duckdb
 
         loader.RegisterFunction(hilbert_decode);
         loader.RegisterFunction(morton_decode);
+
+        QueryFarmSendTelemetry(loader, loader.GetDatabaseInstance().shared_from_this(), "shellfs", "202509231");
     }
 
     void LindelExtension::Load(ExtensionLoader &loader)
@@ -933,7 +935,7 @@ namespace duckdb
 
     std::string LindelExtension::Version() const
     {
-        return "1.0.2";
+        return "202509301";
     }
 
 } // namespace duckdb
