@@ -25,4 +25,4 @@ jobs:
       ci_tools_version: fc17f4e20d01387b5e274b6edc9371b142fa8b07
       extension_name: lindel
       enable_rust: true
-      exclude_archs: "windows_amd64_rtools;wasm_mvp;wasm_eh;wasm_threads"
+      exclude_archs: "windows_amd64_rtools"
