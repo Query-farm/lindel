@@ -921,7 +921,7 @@ namespace duckdb
         loader.RegisterFunction(hilbert_decode);
         loader.RegisterFunction(morton_decode);
 
-        QueryFarmSendTelemetry(loader, loader.GetDatabaseInstance().shared_from_this(), "shellfs", "202509231");
+        QueryFarmSendTelemetry(loader, "lindel", "202509231");
     }
 
     void LindelExtension::Load(ExtensionLoader &loader)
