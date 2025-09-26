@@ -4,8 +4,6 @@
 name: Main Extension Distribution Pipeline
 on:
   push:
-    branches:
-      - v1.4
   pull_request:
   workflow_dispatch:
   schedule:
