@@ -16,11 +16,9 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: rustyconover/extension-ci-tools/.github/workflows/_extension_distribution.yml@f4be2a8a01bb51f6737e1969ad81fb677ab86b17
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
       duckdb_version: v1.4-andium
-      override_ci_tools_repository: rustyconover/extension-ci-tools
-      ci_tools_version: f4be2a8a01bb51f6737e1969ad81fb677ab86b17
+      ci_tools_version: main
       extension_name: lindel
       enable_rust: true
-      exclude_archs: "windows_amd64_rtools"
