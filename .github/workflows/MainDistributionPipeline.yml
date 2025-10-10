@@ -7,7 +7,7 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 * * *'  # Runs every night at 02:00 UTC
+    - cron: "0 2 * * *" # Runs every night at 02:00 UTC
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
@@ -22,5 +22,3 @@ jobs:
       ci_tools_version: main
       extension_name: lindel
       enable_rust: true
-      exclude_archs: "windows_amd64_rtools;wasm_mvp;wasm_eh;wasm_threads"
-
