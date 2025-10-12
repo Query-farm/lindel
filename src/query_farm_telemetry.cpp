@@ -104,7 +104,6 @@ namespace duckdb
 														 len = telemetry_len]() mutable
 				{ sendHTTPRequest(std::move(db_ptr), json, len); });
 #else
-		// Emscripten does not support threads or async tasks, so we just send the request synchronously.
 		sendHTTPRequest(loader.GetDatabaseInstance().shared_from_this(), telemetry_data, telemetry_len);
 #endif
 	}
