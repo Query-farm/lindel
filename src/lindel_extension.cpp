@@ -102,9 +102,9 @@ namespace duckdb
             return val;
         };
 
-        auto return_number_of_parts = UTinyIntValue::Get(get_foldable_value(1, LogicalType::UTINYINT, "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
-        auto return_float = BooleanValue::Get(get_foldable_value(2, LogicalType::BOOLEAN, "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
-        auto return_unsigned = BooleanValue::Get(get_foldable_value(3, LogicalType::BOOLEAN, "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
+        auto return_number_of_parts = UTinyIntValue::Get(get_foldable_value(1, LogicalType(LogicalTypeId::UTINYINT), "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
+        auto return_float = BooleanValue::Get(get_foldable_value(2, LogicalType(LogicalTypeId::BOOLEAN), "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
+        auto return_unsigned = BooleanValue::Get(get_foldable_value(3, LogicalType(LogicalTypeId::BOOLEAN), "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
 
         if (return_number_of_parts == 0)
         {
@@ -124,31 +124,31 @@ namespace duckdb
         {
             switch (left_type.id())
             {
-            case LogicalType::UINTEGER:
-                set_return_type(LogicalType::FLOAT, 1, "UINTEGER", {LogicalType::UINTEGER});
+            case LogicalTypeId::UINTEGER:
+                set_return_type(LogicalType(LogicalTypeId::FLOAT), 1, "UINTEGER", {LogicalType(LogicalTypeId::UINTEGER)});
                 break;
-            case LogicalType::UBIGINT:
+            case LogicalTypeId::UBIGINT:
                 if (return_number_of_parts == 1)
                 {
-                    set_return_type(LogicalType::DOUBLE, 1, "UBIGINT", {LogicalType::UBIGINT});
+                    set_return_type(LogicalType(LogicalTypeId::DOUBLE), 1, "UBIGINT", {LogicalType(LogicalTypeId::UBIGINT)});
                 }
                 else if (return_number_of_parts == 2)
                 {
-                    set_return_type(LogicalType::FLOAT, 2, "UBIGINT", {LogicalType::UBIGINT});
+                    set_return_type(LogicalType(LogicalTypeId::FLOAT), 2, "UBIGINT", {LogicalType(LogicalTypeId::UBIGINT)});
                 }
                 else
                 {
                     throw InvalidInputException("Expected 1 or 2 parts for UBIGINT");
                 }
                 break;
-            case LogicalType::UHUGEINT:
+            case LogicalTypeId::UHUGEINT:
                 if (return_number_of_parts == 2)
                 {
-                    set_return_type(LogicalType::DOUBLE, 2, "UHUGEINT", {LogicalType::UHUGEINT});
+                    set_return_type(LogicalType(LogicalTypeId::DOUBLE), 2, "UHUGEINT", {LogicalType(LogicalTypeId::UHUGEINT)});
                 }
                 else if (return_number_of_parts >= 3 && return_number_of_parts <= 4)
                 {
-                    set_return_type(LogicalType::FLOAT, return_number_of_parts, "UHUGEINT", {LogicalType::UHUGEINT});
+                    set_return_type(LogicalType(LogicalTypeId::FLOAT), return_number_of_parts, "UHUGEINT", {LogicalType(LogicalTypeId::UHUGEINT)});
                 }
                 else
                 {
@@ -164,23 +164,23 @@ namespace duckdb
         if (return_number_of_parts == 1)
         {
             set_return_type(left_type.id(), 1, "UINTEGER, USMALLINT, UTINYINT, UBIGINT, UHUGEINT", {
-                                                                                                       (return_unsigned ? LogicalType::UINTEGER : LogicalType::INTEGER),
-                                                                                                       (return_unsigned ? LogicalType::USMALLINT : LogicalType::SMALLINT),
-                                                                                                       (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT),
-                                                                                                       (return_unsigned ? LogicalType::UBIGINT : LogicalType::BIGINT),
+                                                                                                       (return_unsigned ? LogicalType(LogicalTypeId::UINTEGER) : LogicalType(LogicalTypeId::INTEGER)),
+                                                                                                       (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT)),
+                                                                                                       (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT)),
+                                                                                                       (return_unsigned ? LogicalType(LogicalTypeId::UBIGINT) : LogicalType(LogicalTypeId::BIGINT)),
                                                                                                    });
             return bind_data;
         }
 
-        auto set_integer_return_type = [&](LogicalType base_type, size_t parts, string_t allowed_types, string_t bounds, const map<size_t, LogicalType> &type_map)
+        auto set_integer_return_type = [&](LogicalTypeId base_type, size_t parts, string_t allowed_types, string_t bounds, const map<size_t, LogicalType> &type_map)
         {
             if (type_map.find(return_number_of_parts) != type_map.end())
             {
-                set_return_type(type_map.at(return_number_of_parts), return_number_of_parts, allowed_types, {base_type});
+                set_return_type(type_map.at(return_number_of_parts), return_number_of_parts, allowed_types, {LogicalType(base_type)});
             }
             else
             {
-                throw InvalidInputException("Expected " + bounds.GetString() + " parts for " + base_type.ToString());
+                throw InvalidInputException("Expected " + bounds.GetString() + " parts for " + LogicalType(base_type).ToString());
             }
         };
 
@@ -189,19 +189,19 @@ namespace duckdb
 
         switch (left_type.id())
         {
-        case LogicalType::UTINYINT:
+        case LogicalTypeId::UTINYINT:
             throw InvalidInputException("Expected 1 parts for UTINYINT");
-        case LogicalType::USMALLINT:
-            set_integer_return_type(LogicalType::USMALLINT, return_number_of_parts, "UTINYINT", "2", {{2, return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT}});
+        case LogicalTypeId::USMALLINT:
+            set_integer_return_type(LogicalTypeId::USMALLINT, return_number_of_parts, "UTINYINT", "2", {{2, return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT)}});
             break;
-        case LogicalType::UINTEGER:
-            set_integer_return_type(LogicalType::UINTEGER, return_number_of_parts, "UTINYINT, USMALLINT", "2-4", {{2, (return_unsigned ? LogicalType::USMALLINT : LogicalType::SMALLINT)}, {3, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}});
+        case LogicalTypeId::UINTEGER:
+            set_integer_return_type(LogicalTypeId::UINTEGER, return_number_of_parts, "UTINYINT, USMALLINT", "2-4", {{2, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {3, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}});
             break;
-        case LogicalType::UBIGINT:
-            set_integer_return_type(LogicalType::UBIGINT, return_number_of_parts, "UTINYINT, USMALLINT, UINTEGER", "2-8", {{2, (return_unsigned ? LogicalType::UINTEGER : LogicalType::INTEGER)}, {3, (return_unsigned ? LogicalType::USMALLINT : LogicalType::SMALLINT)}, {4, (return_unsigned ? LogicalType::USMALLINT : LogicalType::SMALLINT)}, {5, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {6, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {7, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {8, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}});
+        case LogicalTypeId::UBIGINT:
+            set_integer_return_type(LogicalTypeId::UBIGINT, return_number_of_parts, "UTINYINT, USMALLINT, UINTEGER", "2-8", {{2, (return_unsigned ? LogicalType(LogicalTypeId::UINTEGER) : LogicalType(LogicalTypeId::INTEGER))}, {3, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {4, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {5, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {6, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {7, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {8, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}});
             break;
-        case LogicalType::UHUGEINT:
-            set_integer_return_type(LogicalType::UHUGEINT, return_number_of_parts, "UTINYINT, USMALLINT, UINTEGER, UBIGINT", "2-16", {{2, (return_unsigned ? LogicalType::UBIGINT : LogicalType::BIGINT)}, {3, (return_unsigned ? LogicalType::UINTEGER : LogicalType::INTEGER)}, {4, (return_unsigned ? LogicalType::UINTEGER : LogicalType::INTEGER)}, {5, (return_unsigned ? LogicalType::USMALLINT : LogicalType::SMALLINT)}, {6, (return_unsigned ? LogicalType::USMALLINT : LogicalType::SMALLINT)}, {7, (return_unsigned ? LogicalType::USMALLINT : LogicalType::SMALLINT)}, {8, (return_unsigned ? LogicalType::USMALLINT : LogicalType::SMALLINT)}, {9, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {10, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {11, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {12, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {13, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {14, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {15, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}, {16, (return_unsigned ? LogicalType::UTINYINT : LogicalType::TINYINT)}});
+        case LogicalTypeId::UHUGEINT:
+            set_integer_return_type(LogicalTypeId::UHUGEINT, return_number_of_parts, "UTINYINT, USMALLINT, UINTEGER, UBIGINT", "2-16", {{2, (return_unsigned ? LogicalType(LogicalTypeId::UBIGINT) : LogicalType(LogicalTypeId::BIGINT))}, {3, (return_unsigned ? LogicalType(LogicalTypeId::UINTEGER) : LogicalType(LogicalTypeId::INTEGER))}, {4, (return_unsigned ? LogicalType(LogicalTypeId::UINTEGER) : LogicalType(LogicalTypeId::INTEGER))}, {5, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {6, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {7, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {8, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {9, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {10, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {11, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {12, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {13, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {14, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {15, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {16, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}});
             break;
         default:
             throw InvalidInputException("Expected UINTEGER, USMALLINT, UTINYINT, UBIGINT, or UHUGEINT");
@@ -462,10 +462,10 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType::UBIGINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
                 break;
             case 2:
-                bound_function.return_type = LogicalType::UHUGEINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths of 1 or 2 for DOUBLE.");
@@ -477,14 +477,14 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType::UINTEGER;
+                bound_function.return_type = LogicalType(LogicalTypeId::UINTEGER);
                 break;
             case 2:
-                bound_function.return_type = LogicalType::UBIGINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
                 break;
             case 3:
             case 4:
-                bound_function.return_type = LogicalType::UHUGEINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-4 for FLOAT.");
@@ -497,10 +497,10 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType::UBIGINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
                 break;
             case 2:
-                bound_function.return_type = LogicalType::UHUGEINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths of 1 or 2 for BIGINT/UBIGINT.");
@@ -513,14 +513,14 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType::UINTEGER;
+                bound_function.return_type = LogicalType(LogicalTypeId::UINTEGER);
                 break;
             case 2:
-                bound_function.return_type = LogicalType::UBIGINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
                 break;
             case 3:
             case 4:
-                bound_function.return_type = LogicalType::UHUGEINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-4 for UINTEGER/INTEGER.");
@@ -533,20 +533,20 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1: // 16
-                bound_function.return_type = LogicalType::USMALLINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::USMALLINT);
                 break;
             case 2: // 32
-                bound_function.return_type = LogicalType::UINTEGER;
+                bound_function.return_type = LogicalType(LogicalTypeId::UINTEGER);
                 break;
             case 3:
             case 4:
-                bound_function.return_type = LogicalType::UBIGINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
                 break;
             case 5:
             case 6:
             case 7:
             case 8:
-                bound_function.return_type = LogicalType::UHUGEINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-8 for USMALLINT/SMALLINT.");
@@ -559,20 +559,20 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType::UTINYINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UTINYINT);
                 break;
             case 2:
-                bound_function.return_type = LogicalType::USMALLINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::USMALLINT);
                 break;
             case 3:
             case 4:
-                bound_function.return_type = LogicalType::UINTEGER;
+                bound_function.return_type = LogicalType(LogicalTypeId::UINTEGER);
                 break;
             case 5:
             case 6:
             case 7:
             case 8:
-                bound_function.return_type = LogicalType::UBIGINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
                 break;
             case 9:
             case 10:
@@ -582,7 +582,7 @@ namespace duckdb
             case 14:
             case 15:
             case 16:
-                bound_function.return_type = LogicalType::UHUGEINT;
+                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-16 for UTINYINT/TINYINT.");
@@ -899,21 +899,21 @@ namespace duckdb
         ScalarFunctionSet morton_decode = ScalarFunctionSet("morton_decode");
 
         std::vector<LogicalType> types_that_can_be_decoded = {
-            LogicalType::UTINYINT,
-            LogicalType::USMALLINT,
-            LogicalType::UINTEGER,
-            LogicalType::UBIGINT,
-            LogicalType::UHUGEINT};
+            LogicalType(LogicalTypeId::UTINYINT),
+            LogicalType(LogicalTypeId::USMALLINT),
+            LogicalType(LogicalTypeId::UINTEGER),
+            LogicalType(LogicalTypeId::UBIGINT),
+            LogicalType(LogicalTypeId::UHUGEINT)};
 
         for (const auto &decodable_type : types_that_can_be_decoded)
         {
             hilbert_decode.AddFunction(
-                ScalarFunction({decodable_type, LogicalType::UTINYINT, LogicalType::BOOLEAN, LogicalType::BOOLEAN}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
+                ScalarFunction({decodable_type, LogicalType(LogicalTypeId::UTINYINT), LogicalType(LogicalTypeId::BOOLEAN), LogicalType(LogicalTypeId::BOOLEAN)}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
                                lindelDecodeArrayFun,
                                lindelDecodeToArrayBind));
 
             morton_decode.AddFunction(
-                ScalarFunction({decodable_type, LogicalType::UTINYINT, LogicalType::BOOLEAN, LogicalType::BOOLEAN}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
+                ScalarFunction({decodable_type, LogicalType(LogicalTypeId::UTINYINT), LogicalType(LogicalTypeId::BOOLEAN), LogicalType(LogicalTypeId::BOOLEAN)}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
                                lindelDecodeArrayFun,
                                lindelDecodeToArrayBind));
         }
