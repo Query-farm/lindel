@@ -4,9 +4,10 @@ on:
   pull_request: null
   workflow_dispatch: null
   schedule:
-  - cron: 0 2 * * *
+    - cron: 0 2 * * *
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{
+  group:
+    ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{
     github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
   cancel-in-progress: true
 jobs:
@@ -16,6 +17,5 @@ jobs:
     with:
       duckdb_version: v1.4-andium
       ci_tools_version: main
-      override_ci_tools_repository: rustyconover/extension-ci-tools
       extension_name: lindel
       enable_rust: true
