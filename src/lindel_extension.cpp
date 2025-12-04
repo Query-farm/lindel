@@ -50,6 +50,86 @@ namespace duckdb
         }
     };
 
+    // Lookup table entry for decode type mapping
+    struct DecodeTypeMapping
+    {
+        LogicalTypeId input_type;
+        uint8_t num_parts;
+        LogicalTypeId unsigned_output;
+        LogicalTypeId signed_output;
+    };
+
+    // Static lookup table for integer decode type mappings
+    // Maps (input_type, num_parts) -> (unsigned_output_type, signed_output_type)
+    static const DecodeTypeMapping DECODE_TYPE_MAPPINGS[] = {
+        // USMALLINT: 2 parts only
+        {LogicalTypeId::USMALLINT, 2, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+
+        // UINTEGER: 2-3 parts
+        {LogicalTypeId::UINTEGER, 2, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
+        {LogicalTypeId::UINTEGER, 3, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+
+        // UBIGINT: 2-8 parts
+        {LogicalTypeId::UBIGINT, 2, LogicalTypeId::UINTEGER, LogicalTypeId::INTEGER},
+        {LogicalTypeId::UBIGINT, 3, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
+        {LogicalTypeId::UBIGINT, 4, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
+        {LogicalTypeId::UBIGINT, 5, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UBIGINT, 6, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UBIGINT, 7, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UBIGINT, 8, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+
+        // UHUGEINT: 2-16 parts
+        {LogicalTypeId::UHUGEINT, 2, LogicalTypeId::UBIGINT, LogicalTypeId::BIGINT},
+        {LogicalTypeId::UHUGEINT, 3, LogicalTypeId::UINTEGER, LogicalTypeId::INTEGER},
+        {LogicalTypeId::UHUGEINT, 4, LogicalTypeId::UINTEGER, LogicalTypeId::INTEGER},
+        {LogicalTypeId::UHUGEINT, 5, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
+        {LogicalTypeId::UHUGEINT, 6, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
+        {LogicalTypeId::UHUGEINT, 7, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
+        {LogicalTypeId::UHUGEINT, 8, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
+        {LogicalTypeId::UHUGEINT, 9, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UHUGEINT, 10, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UHUGEINT, 11, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UHUGEINT, 12, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UHUGEINT, 13, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UHUGEINT, 14, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UHUGEINT, 15, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UHUGEINT, 16, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+    };
+
+    // Helper function to find the output type for a given input type and number of parts
+    static bool FindDecodeOutputType(LogicalTypeId input_type, uint8_t num_parts, bool return_unsigned, LogicalType &output_type)
+    {
+        for (const auto &mapping : DECODE_TYPE_MAPPINGS)
+        {
+            if (mapping.input_type == input_type && mapping.num_parts == num_parts)
+            {
+                output_type = LogicalType(return_unsigned ? mapping.unsigned_output : mapping.signed_output);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Helper function to get valid part range description for error messages
+    static string GetValidPartsDescription(LogicalTypeId input_type)
+    {
+        switch (input_type)
+        {
+        case LogicalTypeId::UTINYINT:
+            return "1";
+        case LogicalTypeId::USMALLINT:
+            return "2";
+        case LogicalTypeId::UINTEGER:
+            return "2-3";
+        case LogicalTypeId::UBIGINT:
+            return "2-8";
+        case LogicalTypeId::UHUGEINT:
+            return "2-16";
+        default:
+            return "unknown";
+        }
+    }
+
     // This is the "bind" fucntion that is called when we are decoding an array of values.
     //
     // In SQL this will be a function of the form:
@@ -172,39 +252,22 @@ namespace duckdb
             return bind_data;
         }
 
-        auto set_integer_return_type = [&](LogicalTypeId base_type, size_t parts, string_t allowed_types, string_t bounds, const map<size_t, LogicalType> &type_map)
+        // Special case: UTINYINT only supports 1 part (already handled above)
+        if (left_type.id() == LogicalTypeId::UTINYINT)
         {
-            if (type_map.find(return_number_of_parts) != type_map.end())
-            {
-                set_return_type(type_map.at(return_number_of_parts), return_number_of_parts, allowed_types, {LogicalType(base_type)});
-            }
-            else
-            {
-                throw InvalidInputException("Expected " + bounds.GetString() + " parts for " + LogicalType(base_type).ToString());
-            }
-        };
-
-        // The number of parts in the output array is determined by the number of parts requested and the datatype passed
-        // to decode.
-
-        switch (left_type.id())
-        {
-        case LogicalTypeId::UTINYINT:
             throw InvalidInputException("Expected 1 parts for UTINYINT");
-        case LogicalTypeId::USMALLINT:
-            set_integer_return_type(LogicalTypeId::USMALLINT, return_number_of_parts, "UTINYINT", "2", {{2, return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT)}});
-            break;
-        case LogicalTypeId::UINTEGER:
-            set_integer_return_type(LogicalTypeId::UINTEGER, return_number_of_parts, "UTINYINT, USMALLINT", "2-4", {{2, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {3, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}});
-            break;
-        case LogicalTypeId::UBIGINT:
-            set_integer_return_type(LogicalTypeId::UBIGINT, return_number_of_parts, "UTINYINT, USMALLINT, UINTEGER", "2-8", {{2, (return_unsigned ? LogicalType(LogicalTypeId::UINTEGER) : LogicalType(LogicalTypeId::INTEGER))}, {3, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {4, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {5, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {6, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {7, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {8, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}});
-            break;
-        case LogicalTypeId::UHUGEINT:
-            set_integer_return_type(LogicalTypeId::UHUGEINT, return_number_of_parts, "UTINYINT, USMALLINT, UINTEGER, UBIGINT", "2-16", {{2, (return_unsigned ? LogicalType(LogicalTypeId::UBIGINT) : LogicalType(LogicalTypeId::BIGINT))}, {3, (return_unsigned ? LogicalType(LogicalTypeId::UINTEGER) : LogicalType(LogicalTypeId::INTEGER))}, {4, (return_unsigned ? LogicalType(LogicalTypeId::UINTEGER) : LogicalType(LogicalTypeId::INTEGER))}, {5, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {6, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {7, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {8, (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT))}, {9, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {10, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {11, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {12, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {13, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {14, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {15, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}, {16, (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT))}});
-            break;
-        default:
-            throw InvalidInputException("Expected UINTEGER, USMALLINT, UTINYINT, UBIGINT, or UHUGEINT");
+        }
+
+        // Use the lookup table to find the output type
+        LogicalType output_type;
+        if (FindDecodeOutputType(left_type.id(), return_number_of_parts, return_unsigned, output_type))
+        {
+            bound_function.return_type = LogicalType::ARRAY(output_type, return_number_of_parts);
+        }
+        else
+        {
+            throw InvalidInputException("Expected " + GetValidPartsDescription(left_type.id()) +
+                                        " parts for " + left_type.ToString());
         }
 
         return bind_data;
@@ -892,8 +955,27 @@ namespace duckdb
         hilbert_encode.AddFunction(SF({LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid())}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
         morton_encode.AddFunction(SF({LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid())}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
 
-        loader.RegisterFunction(hilbert_encode);
-        loader.RegisterFunction(morton_encode);
+        // Register hilbert_encode with documentation
+        CreateScalarFunctionInfo hilbert_encode_info(hilbert_encode);
+        FunctionDescription hilbert_encode_desc;
+        hilbert_encode_desc.description = "Encodes an array of integers or floats into a single unsigned integer using Hilbert curve mapping. "
+                                          "Hilbert curves preserve locality better than Morton encoding, making them ideal for spatial indexing.";
+        hilbert_encode_desc.examples = {"hilbert_encode([1, 2, 3]::INTEGER[3])"};
+        hilbert_encode_desc.categories = {"spatial"};
+        hilbert_encode_desc.parameter_names = {"values"};
+        hilbert_encode_info.descriptions.push_back(hilbert_encode_desc);
+        loader.RegisterFunction(hilbert_encode_info);
+
+        // Register morton_encode with documentation
+        CreateScalarFunctionInfo morton_encode_info(morton_encode);
+        FunctionDescription morton_encode_desc;
+        morton_encode_desc.description = "Encodes an array of integers or floats into a single unsigned integer using Morton (Z-order) curve mapping. "
+                                         "Morton encoding interleaves bits and is computationally simpler than Hilbert encoding.";
+        morton_encode_desc.examples = {"morton_encode([1, 2, 3]::INTEGER[3])"};
+        morton_encode_desc.categories = {"spatial"};
+        morton_encode_desc.parameter_names = {"values"};
+        morton_encode_info.descriptions.push_back(morton_encode_desc);
+        loader.RegisterFunction(morton_encode_info);
 
         ScalarFunctionSet hilbert_decode = ScalarFunctionSet("hilbert_decode");
         ScalarFunctionSet morton_decode = ScalarFunctionSet("morton_decode");
@@ -918,10 +1000,29 @@ namespace duckdb
                                lindelDecodeToArrayBind));
         }
 
-        loader.RegisterFunction(hilbert_decode);
-        loader.RegisterFunction(morton_decode);
+        // Register hilbert_decode with documentation
+        CreateScalarFunctionInfo hilbert_decode_info(hilbert_decode);
+        FunctionDescription hilbert_decode_desc;
+        hilbert_decode_desc.description = "Decodes a Hilbert-encoded unsigned integer back into an array of values. "
+                                          "The number of output elements and their type are determined by the parameters.";
+        hilbert_decode_desc.examples = {"hilbert_decode(123::UBIGINT, 2, false, true)"};
+        hilbert_decode_desc.categories = {"spatial"};
+        hilbert_decode_desc.parameter_names = {"encoded_value", "num_elements", "return_float", "return_unsigned"};
+        hilbert_decode_info.descriptions.push_back(hilbert_decode_desc);
+        loader.RegisterFunction(hilbert_decode_info);
 
-        QueryFarmSendTelemetry(loader, "lindel", "202509231");
+        // Register morton_decode with documentation
+        CreateScalarFunctionInfo morton_decode_info(morton_decode);
+        FunctionDescription morton_decode_desc;
+        morton_decode_desc.description = "Decodes a Morton (Z-order) encoded unsigned integer back into an array of values. "
+                                         "The number of output elements and their type are determined by the parameters.";
+        morton_decode_desc.examples = {"morton_decode(123::UBIGINT, 2, false, true)"};
+        morton_decode_desc.categories = {"spatial"};
+        morton_decode_desc.parameter_names = {"encoded_value", "num_elements", "return_float", "return_unsigned"};
+        morton_decode_info.descriptions.push_back(morton_decode_desc);
+        loader.RegisterFunction(morton_decode_info);
+
+        QueryFarmSendTelemetry(loader, "lindel", "2025120401");
     }
 
     void LindelExtension::Load(ExtensionLoader &loader)
@@ -935,7 +1036,7 @@ namespace duckdb
 
     std::string LindelExtension::Version() const
     {
-        return "202509301";
+        return "2025120401";
     }
 
 } // namespace duckdb
