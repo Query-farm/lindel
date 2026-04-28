@@ -285,6 +285,15 @@ select hilbert_decode(8002395622101954260073409974::UHUGEINT, 3, True, False) as
 ├─────────────────┤
 │ [1.0, 5.0, 6.0] │
 └─────────────────┘
+
+-- Morton (Z-order) round-trip.
+select morton_decode(morton_encode([10, 20]::INTEGER[2]), 2, false, true) as roundtrip;
+┌──────────────┐
+│  roundtrip   │
+│ uinteger[2]  │
+├──────────────┤
+│ [10, 20]     │
+└──────────────┘
 ```
 ## Credits
 
