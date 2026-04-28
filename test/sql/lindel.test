@@ -109,3 +109,50 @@ elements as a cross join elements as b order by a, b;
 4	2	30	36	[4, 2]	[4, 2]
 4	3	31	37	[4, 3]	[4, 3]
 4	4	32	48	[4, 4]	[4, 4]
+
+# Regression: 3D INTEGER/FLOAT encode previously triggered a UINT64 vs UINT128
+# vector-type assertion because the bind returned UHUGEINT but the encode
+# function wrote a UBIGINT result for case 3 (issue #8).
+query I
+SELECT hilbert_encode([10, 20, 30]::INTEGER[3]);
+----
+11440
+
+query I
+SELECT morton_encode([10, 20, 30]::INTEGER[3]);
+----
+15080
+
+query I
+SELECT morton_encode([1.0, 5.0, 6.0]::FLOAT[3]) > 0;
+----
+true
+
+# Regression: unsigned narrow-int element types previously failed because the
+# encode path called FlatVector::GetData<int*_t> on UTINYINT/USMALLINT/UINTEGER
+# vectors, which trips a typed-vector assertion (issue #8).
+query I
+SELECT hilbert_encode([10, 20]::UINTEGER[2]);
+----
+884
+
+query I
+SELECT hilbert_encode([10, 20, 30]::UTINYINT[3]);
+----
+11440
+
+query I
+SELECT hilbert_encode([10, 20, 30]::USMALLINT[3]);
+----
+18720
+
+query I
+SELECT morton_encode([10, 20]::UINTEGER[2]);
+----
+408
+
+# Round-trip through morton_decode (documented snippet, issue #9).
+query I
+SELECT morton_decode(morton_encode([10, 20]::INTEGER[2]), 2, false, true);
+----
+[10, 20]

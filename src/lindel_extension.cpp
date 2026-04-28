@@ -736,7 +736,6 @@ namespace duckdb
                     break;
                 }
                 case 2:
-                case 3:
                 {
                     auto left_data_float = FlatVector::GetData<float_t>(left_child);
                     auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
@@ -744,12 +743,13 @@ namespace duckdb
                     encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u64 + i);
                     break;
                 }
+                case 3:
                 case 4:
                 {
                     auto left_data_float = FlatVector::GetData<float_t>(left_child);
                     auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
 
-                    hilbert_encode_u32_var((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u128 + i);
+                    encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u128 + i);
                     break;
                 }
                 default:
@@ -761,22 +761,19 @@ namespace duckdb
             case LogicalTypeId::BIGINT:
             {
                 auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u64_var : morton_encode_u64_var;
+                auto left_data_64 = (uint64_t *)FlatVector::GetData(left_child);
                 switch (array_number_of_elements)
                 {
                 case 1:
                 {
-                    auto left_data_64 = FlatVector::GetData<int64_t>(left_child);
                     auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
-
-                    encoder((uint64_t *)(left_data_64 + left_offset), array_number_of_elements, result_data_u64 + i);
+                    encoder(left_data_64 + left_offset, array_number_of_elements, result_data_u64 + i);
                     break;
                 }
                 case 2:
                 {
-                    auto left_data_64 = FlatVector::GetData<int64_t>(left_child);
                     auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
-
-                    encoder((uint64_t *)(left_data_64 + left_offset), array_number_of_elements, result_data_u128 + i);
+                    encoder(left_data_64 + left_offset, array_number_of_elements, result_data_u128 + i);
                     break;
                 }
                 default:
@@ -789,32 +786,27 @@ namespace duckdb
             case LogicalTypeId::INTEGER:
             {
                 auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u32_var : morton_encode_u32_var;
+                auto left_data_32 = (uint32_t *)FlatVector::GetData(left_child);
                 // The number of elements in the array dictates the output type.
                 switch (array_number_of_elements)
                 {
                 case 1:
                 {
-                    auto left_data_32 = FlatVector::GetData<int32_t>(left_child);
                     auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
-
-                    encoder((uint32_t *)(left_data_32 + left_offset), array_number_of_elements, result_data_u32 + i);
+                    encoder(left_data_32 + left_offset, array_number_of_elements, result_data_u32 + i);
                     break;
                 }
                 case 2:
-                case 3:
                 {
-                    auto left_data_32 = FlatVector::GetData<int32_t>(left_child);
                     auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
-
-                    encoder((uint32_t *)(left_data_32 + left_offset), array_number_of_elements, result_data_u64 + i);
+                    encoder(left_data_32 + left_offset, array_number_of_elements, result_data_u64 + i);
                     break;
                 }
+                case 3:
                 case 4:
                 {
-                    auto left_data_32 = FlatVector::GetData<int32_t>(left_child);
                     auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
-
-                    encoder((uint32_t *)(left_data_32 + left_offset), array_number_of_elements, result_data_u128 + i);
+                    encoder(left_data_32 + left_offset, array_number_of_elements, result_data_u128 + i);
                     break;
                 }
                 default:
@@ -827,31 +819,26 @@ namespace duckdb
             {
                 // The number of elements in the array dictates the output type.
                 auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u16_var : morton_encode_u16_var;
+                auto left_data_16 = (uint16_t *)FlatVector::GetData(left_child);
                 switch (array_number_of_elements)
                 {
                 case 1:
                 {
-                    auto left_data_16 = FlatVector::GetData<int16_t>(left_child);
                     auto result_data_u16 = FlatVector::GetData<uint16_t>(result);
-
-                    encoder((uint16_t *)(left_data_16 + left_offset), array_number_of_elements, result_data_u16 + i);
+                    encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u16 + i);
                     break;
                 }
                 case 2:
                 {
-                    auto left_data_16 = FlatVector::GetData<int16_t>(left_child);
                     auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
-
-                    encoder((uint16_t *)(left_data_16 + left_offset), array_number_of_elements, result_data_u32 + i);
+                    encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u32 + i);
                     break;
                 }
                 case 3:
                 case 4:
                 {
-                    auto left_data_16 = FlatVector::GetData<int16_t>(left_child);
                     auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
-
-                    encoder((uint16_t *)(left_data_16 + left_offset), array_number_of_elements, result_data_u64 + i);
+                    encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u64 + i);
                     break;
                 }
                 case 5:
@@ -859,10 +846,8 @@ namespace duckdb
                 case 7:
                 case 8:
                 {
-                    auto left_data_16 = FlatVector::GetData<int16_t>(left_child);
                     auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
-
-                    encoder((uint16_t *)(left_data_16 + left_offset), array_number_of_elements, result_data_u128 + i);
+                    encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u128 + i);
                     break;
                 }
                 default:
@@ -875,31 +860,26 @@ namespace duckdb
             {
                 // The number of elements in the array dictates the output type.
                 auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u8_var : morton_encode_u8_var;
+                auto left_data_8 = (uint8_t *)FlatVector::GetData(left_child);
                 switch (array_number_of_elements)
                 {
                 case 1:
                 {
-                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
                     auto result_data_u8 = FlatVector::GetData<uint8_t>(result);
-
-                    encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u8 + i);
+                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u8 + i);
                     break;
                 }
                 case 2:
                 {
-                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
                     auto result_data_u16 = FlatVector::GetData<uint16_t>(result);
-
-                    encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u16 + i);
+                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u16 + i);
                     break;
                 }
                 case 3:
                 case 4:
                 {
-                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
                     auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
-
-                    encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u32 + i);
+                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u32 + i);
                     break;
                 }
                 case 5:
@@ -907,10 +887,8 @@ namespace duckdb
                 case 7:
                 case 8:
                 {
-                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
                     auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
-
-                    encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u64 + i);
+                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u64 + i);
                     break;
                 }
                 case 9:
@@ -922,10 +900,8 @@ namespace duckdb
                 case 15:
                 case 16:
                 {
-                    auto left_data_8 = FlatVector::GetData<int8_t>(left_child);
                     auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
-
-                    encoder((uint8_t *)(left_data_8 + left_offset), array_number_of_elements, result_data_u128 + i);
+                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u128 + i);
                     break;
                 }
                 default:
@@ -1022,7 +998,7 @@ namespace duckdb
         morton_decode_info.descriptions.push_back(morton_decode_desc);
         loader.RegisterFunction(morton_decode_info);
 
-        QueryFarmSendTelemetry(loader, "lindel", "2025120401");
+        QueryFarmSendTelemetry(loader, "lindel", "2026042801");
     }
 
     void LindelExtension::Load(ExtensionLoader &loader)
@@ -1036,7 +1012,7 @@ namespace duckdb
 
     std::string LindelExtension::Version() const
     {
-        return "2025120401";
+        return "2026042801";
     }
 
 } // namespace duckdb
