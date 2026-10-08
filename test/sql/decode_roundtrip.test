@@ -110,6 +110,7 @@ true
 
 # Four byte-sized coordinates produce a UINTEGER key.
 foreach type TINYINT UTINYINT
+
 query I
 SELECT ${curve}_decode(${curve}_encode([1, 2, 3, 4]::${type}[4]), 4, false, false) = [1, 2, 3, 4]::TINYINT[4];
 ----
@@ -135,6 +136,7 @@ Number of parts to return must be greater than 0.
 
 # Exercise every supported dimension across multiple execution vectors.
 loop dimensions 1 17
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127 - 63)::TINYINT[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, false, false) AS b FROM coordinates)
@@ -145,6 +147,7 @@ true	true
 endloop
 
 loop dimensions 1 17
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127)::UTINYINT[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, false, true) AS b FROM coordinates)
@@ -155,6 +158,7 @@ true	true
 endloop
 
 loop dimensions 1 9
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127 - 63)::SMALLINT[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, false, false) AS b FROM coordinates)
@@ -165,6 +169,7 @@ true	true
 endloop
 
 loop dimensions 1 9
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127)::USMALLINT[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, false, true) AS b FROM coordinates)
@@ -175,6 +180,7 @@ true	true
 endloop
 
 loop dimensions 1 5
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127 - 63)::INTEGER[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, false, false) AS b FROM coordinates)
@@ -185,6 +191,7 @@ true	true
 endloop
 
 loop dimensions 1 5
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127)::UINTEGER[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, false, true) AS b FROM coordinates)
@@ -195,6 +202,7 @@ true	true
 endloop
 
 loop dimensions 1 3
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127 - 63)::BIGINT[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, false, false) AS b FROM coordinates)
@@ -205,6 +213,7 @@ true	true
 endloop
 
 loop dimensions 1 3
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127)::UBIGINT[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, false, true) AS b FROM coordinates)
@@ -215,6 +224,7 @@ true	true
 endloop
 
 loop dimensions 1 5
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127 - 63)::FLOAT[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, true, false) AS b FROM coordinates)
@@ -225,6 +235,7 @@ true	true
 endloop
 
 loop dimensions 1 3
+
 query II
 WITH coordinates AS (SELECT list_transform(range(${dimensions}), x -> (i + x) % 127 - 63)::DOUBLE[${dimensions}] AS a FROM range(4097) t(i)),
 roundtrips AS (SELECT a, ${curve}_decode(${curve}_encode(a), ${dimensions}, true, false) AS b FROM coordinates)
