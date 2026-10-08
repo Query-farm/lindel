@@ -30,3 +30,9 @@ LOAD lindel;
 ## Development
 
 For instructions on building the extension from source and running its tests, see [BUILDING.md](BUILDING.md).
+
+## Compatibility notes
+
+Version `2026100701` fixes signed one-dimensional Hilbert/Morton decoding and four-dimensional 8-bit integer decoding. Encoded keys remain unsigned; `return_unsigned = false` selects signed coordinates. Decoding a `UINTEGER` key as floating-point now rejects dimension counts other than one instead of silently ignoring the requested count.
+
+Older community binaries may retain the previous behavior until the fixed source is published.

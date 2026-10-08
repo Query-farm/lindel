@@ -62,12 +62,19 @@ namespace duckdb
     // Static lookup table for integer decode type mappings
     // Maps (input_type, num_parts) -> (unsigned_output_type, signed_output_type)
     static const DecodeTypeMapping DECODE_TYPE_MAPPINGS[] = {
+        // One-dimensional encodings are unsigned keys even for signed coordinates.
+        {LogicalTypeId::UTINYINT, 1, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::USMALLINT, 1, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
+        {LogicalTypeId::UINTEGER, 1, LogicalTypeId::UINTEGER, LogicalTypeId::INTEGER},
+        {LogicalTypeId::UBIGINT, 1, LogicalTypeId::UBIGINT, LogicalTypeId::BIGINT},
+
         // USMALLINT: 2 parts only
         {LogicalTypeId::USMALLINT, 2, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
 
-        // UINTEGER: 2-3 parts
+        // UINTEGER: 2-4 parts
         {LogicalTypeId::UINTEGER, 2, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
         {LogicalTypeId::UINTEGER, 3, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+        {LogicalTypeId::UINTEGER, 4, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
 
         // UBIGINT: 2-8 parts
         {LogicalTypeId::UBIGINT, 2, LogicalTypeId::UINTEGER, LogicalTypeId::INTEGER},
@@ -118,11 +125,11 @@ namespace duckdb
         case LogicalTypeId::UTINYINT:
             return "1";
         case LogicalTypeId::USMALLINT:
-            return "2";
+            return "1-2";
         case LogicalTypeId::UINTEGER:
-            return "2-3";
+            return "1-4";
         case LogicalTypeId::UBIGINT:
-            return "2-8";
+            return "1-8";
         case LogicalTypeId::UHUGEINT:
             return "2-16";
         default:
@@ -205,6 +212,10 @@ namespace duckdb
             switch (left_type.id())
             {
             case LogicalTypeId::UINTEGER:
+                if (return_number_of_parts != 1)
+                {
+                    throw InvalidInputException("Expected 1 part for UINTEGER when returning floats");
+                }
                 set_return_type(LogicalType(LogicalTypeId::FLOAT), 1, "UINTEGER", {LogicalType(LogicalTypeId::UINTEGER)});
                 break;
             case LogicalTypeId::UBIGINT:
@@ -239,23 +250,6 @@ namespace duckdb
                 throw InvalidInputException("Expected UINTEGER, UBIGINT, or UHUGEINT");
             }
             return bind_data;
-        }
-
-        if (return_number_of_parts == 1)
-        {
-            set_return_type(left_type.id(), 1, "UINTEGER, USMALLINT, UTINYINT, UBIGINT, UHUGEINT", {
-                                                                                                       (return_unsigned ? LogicalType(LogicalTypeId::UINTEGER) : LogicalType(LogicalTypeId::INTEGER)),
-                                                                                                       (return_unsigned ? LogicalType(LogicalTypeId::USMALLINT) : LogicalType(LogicalTypeId::SMALLINT)),
-                                                                                                       (return_unsigned ? LogicalType(LogicalTypeId::UTINYINT) : LogicalType(LogicalTypeId::TINYINT)),
-                                                                                                       (return_unsigned ? LogicalType(LogicalTypeId::UBIGINT) : LogicalType(LogicalTypeId::BIGINT)),
-                                                                                                   });
-            return bind_data;
-        }
-
-        // Special case: UTINYINT only supports 1 part (already handled above)
-        if (left_type.id() == LogicalTypeId::UTINYINT)
-        {
-            throw InvalidInputException("Expected 1 parts for UTINYINT");
         }
 
         // Use the lookup table to find the output type
@@ -980,8 +974,10 @@ namespace duckdb
         CreateScalarFunctionInfo hilbert_decode_info(hilbert_decode);
         FunctionDescription hilbert_decode_desc;
         hilbert_decode_desc.description = "Decodes a Hilbert-encoded unsigned integer back into an array of values. "
-                                          "The number of output elements and their type are determined by the parameters.";
-        hilbert_decode_desc.examples = {"hilbert_decode(123::UBIGINT, 2, false, true)"};
+                                          "The number of output elements and their type are determined by the parameters. "
+                                          "Keep the encoded key unsigned; return_unsigned selects signed or unsigned integer coordinates.";
+        hilbert_decode_desc.examples = {"hilbert_decode(123::UBIGINT, 2, false, true)",
+                                        "hilbert_decode(hilbert_encode([-1]::INTEGER[1]), 1, false, false)"};
         hilbert_decode_desc.categories = {"spatial"};
         hilbert_decode_desc.parameter_names = {"encoded_value", "num_elements", "return_float", "return_unsigned"};
         hilbert_decode_info.descriptions.push_back(hilbert_decode_desc);
@@ -991,14 +987,16 @@ namespace duckdb
         CreateScalarFunctionInfo morton_decode_info(morton_decode);
         FunctionDescription morton_decode_desc;
         morton_decode_desc.description = "Decodes a Morton (Z-order) encoded unsigned integer back into an array of values. "
-                                         "The number of output elements and their type are determined by the parameters.";
-        morton_decode_desc.examples = {"morton_decode(123::UBIGINT, 2, false, true)"};
+                                         "The number of output elements and their type are determined by the parameters. "
+                                          "Keep the encoded key unsigned; return_unsigned selects signed or unsigned integer coordinates.";
+        morton_decode_desc.examples = {"morton_decode(123::UBIGINT, 2, false, true)",
+                                       "morton_decode(morton_encode([-1]::INTEGER[1]), 1, false, false)"};
         morton_decode_desc.categories = {"spatial"};
         morton_decode_desc.parameter_names = {"encoded_value", "num_elements", "return_float", "return_unsigned"};
         morton_decode_info.descriptions.push_back(morton_decode_desc);
         loader.RegisterFunction(morton_decode_info);
 
-        QueryFarmSendTelemetry(loader, "lindel", "2026072501");
+        QueryFarmSendTelemetry(loader, "lindel", "2026100701");
     }
 
     void LindelExtension::Load(ExtensionLoader &loader)
@@ -1012,7 +1010,7 @@ namespace duckdb
 
     std::string LindelExtension::Version() const
     {
-        return "2026072501";
+        return "2026100701";
     }
 
 } // namespace duckdb
