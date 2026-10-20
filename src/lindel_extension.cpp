@@ -996,7 +996,7 @@ namespace duckdb
         morton_decode_info.descriptions.push_back(morton_decode_desc);
         loader.RegisterFunction(morton_decode_info);
 
-        QueryFarmSendTelemetry(loader, "lindel", "2026100701");
+        QueryFarmSendTelemetry(loader, "lindel", "2026102001");
     }
 
     void LindelExtension::Load(ExtensionLoader &loader)
@@ -1010,7 +1010,7 @@ namespace duckdb
 
     std::string LindelExtension::Version() const
     {
-        return "2026100701";
+        return "2026102001";
     }
 
 } // namespace duckdb
