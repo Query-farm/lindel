@@ -6,6 +6,10 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/common/vector/array_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/unified_vector_format.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
@@ -156,15 +160,17 @@ namespace duckdb
     // This function also determines the actual type that will be returned by the function, it will always be an array
     // but the type of element and number of elements will depend on the input type and what the caller requests.
     //
-    static unique_ptr<FunctionData> lindelDecodeToArrayBind(ClientContext &context, ScalarFunction &bound_function,
-                                                            vector<unique_ptr<Expression>> &arguments)
+    static unique_ptr<FunctionData> lindelDecodeToArrayBind(BindScalarFunctionInput &input)
     {
+        auto &context = input.GetClientContext();
+        auto &bound_function = input.GetBoundFunction();
+        auto &arguments = input.GetArguments();
         unique_ptr<lindelEncodingBindData> bind_data = make_uniq<lindelEncodingBindData>(0);
-        if (bound_function.name == "hilbert_decode")
+        if (bound_function.GetName() == "hilbert_decode")
         {
             bind_data->encoding_type = 0;
         }
-        else if (bound_function.name == "morton_decode")
+        else if (bound_function.GetName() == "morton_decode")
         {
             bind_data->encoding_type = 1;
         }
@@ -173,7 +179,7 @@ namespace duckdb
             throw NotImplementedException("Unknown function name in lindelDecodeToArrayBind, expected either hilbert_decode() or morton_decode()");
         }
 
-        auto &left_type = arguments[0]->return_type;
+        auto &left_type = arguments[0]->GetReturnType();
 
         auto get_foldable_value = [&](size_t index, LogicalType expected_type, const string &error_msg) -> Value
         {
@@ -204,7 +210,7 @@ namespace duckdb
             {
                 throw InvalidInputException("Expected one of the following types:" + allowed_types.GetString());
             }
-            bound_function.return_type = LogicalType::ARRAY(base_type, parts);
+            bound_function.SetReturnType(LogicalType::ARRAY(base_type, parts));
         };
 
         if (return_float)
@@ -256,7 +262,7 @@ namespace duckdb
         LogicalType output_type;
         if (FindDecodeOutputType(left_type.id(), return_number_of_parts, return_unsigned, output_type))
         {
-            bound_function.return_type = LogicalType::ARRAY(output_type, return_number_of_parts);
+            bound_function.SetReturnType(LogicalType::ARRAY(output_type, return_number_of_parts));
         }
         else
         {
@@ -288,7 +294,7 @@ namespace duckdb
     };
 
     // Helper function to get input data pointer and increment size
-    inline DecodeInputDataInfo getDecodeInputDataInfo(Vector &input_vector)
+    inline DecodeInputDataInfo getDecodeInputDataInfo(const Vector &input_vector, const UnifiedVectorFormat &input_format)
     {
         void *data_ptr = NULL;
         size_t increment = 0;
@@ -296,43 +302,43 @@ namespace duckdb
         switch (input_vector.GetType().id())
         {
         case LogicalTypeId::UTINYINT:
-            data_ptr = FlatVector::GetData<uint8_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uint8_t>(input_format);
             increment = sizeof(uint8_t);
             break;
         case LogicalTypeId::TINYINT:
-            data_ptr = FlatVector::GetData<int8_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<int8_t>(input_format);
             increment = sizeof(int8_t);
             break;
         case LogicalTypeId::USMALLINT:
-            data_ptr = FlatVector::GetData<uint16_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uint16_t>(input_format);
             increment = sizeof(uint16_t);
             break;
         case LogicalTypeId::SMALLINT:
-            data_ptr = FlatVector::GetData<int16_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<int16_t>(input_format);
             increment = sizeof(int16_t);
             break;
         case LogicalTypeId::UINTEGER:
-            data_ptr = FlatVector::GetData<uint32_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uint32_t>(input_format);
             increment = sizeof(uint32_t);
             break;
         case LogicalTypeId::INTEGER:
-            data_ptr = FlatVector::GetData<int32_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<int32_t>(input_format);
             increment = sizeof(int32_t);
             break;
         case LogicalTypeId::UBIGINT:
-            data_ptr = FlatVector::GetData<uint64_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uint64_t>(input_format);
             increment = sizeof(uint64_t);
             break;
         case LogicalTypeId::BIGINT:
-            data_ptr = FlatVector::GetData<int64_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<int64_t>(input_format);
             increment = sizeof(int64_t);
             break;
         case LogicalTypeId::UHUGEINT:
-            data_ptr = FlatVector::GetData<uhugeint_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uhugeint_t>(input_format);
             increment = sizeof(uhugeint_t);
             break;
         case LogicalTypeId::HUGEINT:
-            data_ptr = FlatVector::GetData<hugeint_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<hugeint_t>(input_format);
             increment = sizeof(hugeint_t);
             break;
         default:
@@ -345,7 +351,7 @@ namespace duckdb
     // Helper function to get output data pointer, increment size, and bit width
     inline DecodeOutputDataInfo getDecodeOutputDataInfo(Vector &result, const LogicalType &output_child_type)
     {
-        auto &result_data_children = ArrayVector::GetEntry(result);
+        auto &result_data_children = ArrayVector::GetChildMutable(result);
         void *data_ptr = NULL;
         size_t increment = 0;
         uint8_t bit_width = 0;
@@ -353,62 +359,62 @@ namespace duckdb
         switch (output_child_type.id())
         {
         case LogicalTypeId::UTINYINT:
-            data_ptr = FlatVector::GetData<uint8_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<uint8_t>(result_data_children);
             increment = sizeof(uint8_t);
             bit_width = 8;
             break;
         case LogicalTypeId::TINYINT:
-            data_ptr = FlatVector::GetData<int8_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<int8_t>(result_data_children);
             increment = sizeof(int8_t);
             bit_width = 8;
             break;
         case LogicalTypeId::USMALLINT:
-            data_ptr = FlatVector::GetData<uint16_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<uint16_t>(result_data_children);
             increment = sizeof(uint16_t);
             bit_width = 16;
             break;
         case LogicalTypeId::SMALLINT:
-            data_ptr = FlatVector::GetData<int16_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<int16_t>(result_data_children);
             increment = sizeof(int16_t);
             bit_width = 16;
             break;
         case LogicalTypeId::UINTEGER:
-            data_ptr = FlatVector::GetData<uint32_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<uint32_t>(result_data_children);
             increment = sizeof(uint32_t);
             bit_width = 32;
             break;
         case LogicalTypeId::INTEGER:
-            data_ptr = FlatVector::GetData<int32_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<int32_t>(result_data_children);
             increment = sizeof(int32_t);
             bit_width = 32;
             break;
         case LogicalTypeId::FLOAT:
-            data_ptr = FlatVector::GetData<float>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<float>(result_data_children);
             increment = sizeof(float);
             bit_width = 32;
             break;
         case LogicalTypeId::UBIGINT:
-            data_ptr = FlatVector::GetData<uint64_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<uint64_t>(result_data_children);
             increment = sizeof(uint64_t);
             bit_width = 64;
             break;
         case LogicalTypeId::BIGINT:
-            data_ptr = FlatVector::GetData<int64_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<int64_t>(result_data_children);
             increment = sizeof(int64_t);
             bit_width = 64;
             break;
         case LogicalTypeId::DOUBLE:
-            data_ptr = FlatVector::GetData<double>(result_data_children); // Fixed: was int64_t
+            data_ptr = FlatVector::GetDataMutable<double>(result_data_children); // Fixed: was int64_t
             increment = sizeof(double);
             bit_width = 64;
             break;
         case LogicalTypeId::UHUGEINT:
-            data_ptr = FlatVector::GetData<uhugeint_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<uhugeint_t>(result_data_children);
             increment = sizeof(uhugeint_t);
             bit_width = 128;
             break;
         case LogicalTypeId::HUGEINT:
-            data_ptr = FlatVector::GetData<hugeint_t>(result_data_children);
+            data_ptr = FlatVector::GetDataMutable<hugeint_t>(result_data_children);
             increment = sizeof(hugeint_t);
             bit_width = 128;
             break;
@@ -459,17 +465,17 @@ namespace duckdb
         // Get a reference to the bind data that was already created that will determine the type
         // of encoding to use.
         auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-        auto &bind_info = func_expr.bind_info->Cast<lindelEncodingBindData>();
+        auto &bind_info = func_expr.BindInfo()->Cast<lindelEncodingBindData>();
 
         // Reference the source data.
         auto &left = args.data[0];
 
         // Standardize the vectors to a unified format, so it can be iterated.
         UnifiedVectorFormat left_format;
-        left.ToUnifiedFormat(args.size(), left_format);
+        left.ToUnifiedFormat(left_format);
 
         // Get typed pointers and metadata for input and output
-        DecodeInputDataInfo input_info = getDecodeInputDataInfo(left);
+        DecodeInputDataInfo input_info = getDecodeInputDataInfo(left, left_format);
         DecodeOutputDataInfo output_info = getDecodeOutputDataInfo(result, output_child_type);
 
         // Process each row
@@ -486,15 +492,16 @@ namespace duckdb
     // This is the "bind" function that is called for encoding an array of values.
     //
     // It doesn't have to do anything with the return type right now but it may in the future.
-    static unique_ptr<FunctionData> lindelEncodeArrayBind(ClientContext &context, ScalarFunction &bound_function,
-                                                          vector<unique_ptr<Expression>> &arguments)
+    static unique_ptr<FunctionData> lindelEncodeArrayBind(BindScalarFunctionInput &input)
     {
+        auto &bound_function = input.GetBoundFunction();
+        auto &arguments = input.GetArguments();
         unique_ptr<lindelEncodingBindData> bind_data = make_uniq<lindelEncodingBindData>(0);
-        if (bound_function.name == "hilbert_encode")
+        if (bound_function.GetName() == "hilbert_encode")
         {
             bind_data->encoding_type = 0;
         }
-        else if (bound_function.name == "morton_encode")
+        else if (bound_function.GetName() == "morton_encode")
         {
             bind_data->encoding_type = 1;
         }
@@ -504,7 +511,7 @@ namespace duckdb
         }
 
         // Now deal with validating the input type
-        auto &left_type = arguments[0]->return_type;
+        auto &left_type = arguments[0]->GetReturnType();
 
         // This is the number of elements in the output array, not the number of rows being procssed.
         auto input_number_of_elements = ArrayType::GetSize(left_type);
@@ -519,10 +526,10 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
                 break;
             case 2:
-                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths of 1 or 2 for DOUBLE.");
@@ -534,14 +541,14 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType(LogicalTypeId::UINTEGER);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UINTEGER));
                 break;
             case 2:
-                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
                 break;
             case 3:
             case 4:
-                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-4 for FLOAT.");
@@ -554,10 +561,10 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
                 break;
             case 2:
-                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths of 1 or 2 for BIGINT/UBIGINT.");
@@ -570,14 +577,14 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType(LogicalTypeId::UINTEGER);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UINTEGER));
                 break;
             case 2:
-                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
                 break;
             case 3:
             case 4:
-                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-4 for UINTEGER/INTEGER.");
@@ -590,20 +597,20 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1: // 16
-                bound_function.return_type = LogicalType(LogicalTypeId::USMALLINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::USMALLINT));
                 break;
             case 2: // 32
-                bound_function.return_type = LogicalType(LogicalTypeId::UINTEGER);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UINTEGER));
                 break;
             case 3:
             case 4:
-                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
                 break;
             case 5:
             case 6:
             case 7:
             case 8:
-                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-8 for USMALLINT/SMALLINT.");
@@ -616,20 +623,20 @@ namespace duckdb
             switch (input_number_of_elements)
             {
             case 1:
-                bound_function.return_type = LogicalType(LogicalTypeId::UTINYINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UTINYINT));
                 break;
             case 2:
-                bound_function.return_type = LogicalType(LogicalTypeId::USMALLINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::USMALLINT));
                 break;
             case 3:
             case 4:
-                bound_function.return_type = LogicalType(LogicalTypeId::UINTEGER);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UINTEGER));
                 break;
             case 5:
             case 6:
             case 7:
             case 8:
-                bound_function.return_type = LogicalType(LogicalTypeId::UBIGINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
                 break;
             case 9:
             case 10:
@@ -639,7 +646,7 @@ namespace duckdb
             case 14:
             case 15:
             case 16:
-                bound_function.return_type = LogicalType(LogicalTypeId::UHUGEINT);
+                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
                 break;
             default:
                 throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-16 for UTINYINT/TINYINT.");
@@ -658,19 +665,19 @@ namespace duckdb
     {
         // Get a reference to the bind data.
         auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-        auto &bind_info = func_expr.bind_info->Cast<lindelEncodingBindData>();
+        auto &bind_info = func_expr.BindInfo()->Cast<lindelEncodingBindData>();
 
         // This is the size of the array
         auto array_number_of_elements = ArrayType::GetSize(args.data[0].GetType());
         auto child_type = ArrayType::GetChildType(args.data[0].GetType());
 
         // Get a pointer to the input data.
-        auto left = args.data[0];
-        auto &left_child = ArrayVector::GetEntry(left);
+        auto &left = args.data[0];
+        auto &left_child = ArrayVector::GetChild(left);
         auto &left_child_validity = FlatVector::Validity(left_child);
         UnifiedVectorFormat left_format;
 
-        left.ToUnifiedFormat(args.size(), left_format);
+        left.ToUnifiedFormat(left_format);
 
         for (idx_t i = 0; i < args.size(); i++)
         {
@@ -697,7 +704,7 @@ namespace duckdb
                 case 1:
                 {
                     auto left_data_double = FlatVector::GetData<double_t>(left_child);
-                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
 
                     encoder((uint64_t *)(left_data_double + left_offset), array_number_of_elements, result_data_u64 + i);
                     break;
@@ -705,7 +712,7 @@ namespace duckdb
                 case 2:
                 {
                     auto left_data_double = FlatVector::GetData<double_t>(left_child);
-                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
 
                     encoder((uint64_t *)(left_data_double + left_offset), array_number_of_elements, result_data_u128 + i);
                     break;
@@ -724,7 +731,7 @@ namespace duckdb
                 case 1:
                 {
                     auto left_data_float = FlatVector::GetData<float_t>(left_child);
-                    auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
+                    auto result_data_u32 = FlatVector::GetDataMutable<uint32_t>(result);
 
                     encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u32 + i);
                     break;
@@ -732,7 +739,7 @@ namespace duckdb
                 case 2:
                 {
                     auto left_data_float = FlatVector::GetData<float_t>(left_child);
-                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
 
                     encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u64 + i);
                     break;
@@ -741,7 +748,7 @@ namespace duckdb
                 case 4:
                 {
                     auto left_data_float = FlatVector::GetData<float_t>(left_child);
-                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
 
                     encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u128 + i);
                     break;
@@ -760,13 +767,13 @@ namespace duckdb
                 {
                 case 1:
                 {
-                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
                     encoder(left_data_64 + left_offset, array_number_of_elements, result_data_u64 + i);
                     break;
                 }
                 case 2:
                 {
-                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
                     encoder(left_data_64 + left_offset, array_number_of_elements, result_data_u128 + i);
                     break;
                 }
@@ -786,20 +793,20 @@ namespace duckdb
                 {
                 case 1:
                 {
-                    auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
+                    auto result_data_u32 = FlatVector::GetDataMutable<uint32_t>(result);
                     encoder(left_data_32 + left_offset, array_number_of_elements, result_data_u32 + i);
                     break;
                 }
                 case 2:
                 {
-                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
                     encoder(left_data_32 + left_offset, array_number_of_elements, result_data_u64 + i);
                     break;
                 }
                 case 3:
                 case 4:
                 {
-                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
                     encoder(left_data_32 + left_offset, array_number_of_elements, result_data_u128 + i);
                     break;
                 }
@@ -818,20 +825,20 @@ namespace duckdb
                 {
                 case 1:
                 {
-                    auto result_data_u16 = FlatVector::GetData<uint16_t>(result);
+                    auto result_data_u16 = FlatVector::GetDataMutable<uint16_t>(result);
                     encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u16 + i);
                     break;
                 }
                 case 2:
                 {
-                    auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
+                    auto result_data_u32 = FlatVector::GetDataMutable<uint32_t>(result);
                     encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u32 + i);
                     break;
                 }
                 case 3:
                 case 4:
                 {
-                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
                     encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u64 + i);
                     break;
                 }
@@ -840,7 +847,7 @@ namespace duckdb
                 case 7:
                 case 8:
                 {
-                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
                     encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u128 + i);
                     break;
                 }
@@ -859,20 +866,20 @@ namespace duckdb
                 {
                 case 1:
                 {
-                    auto result_data_u8 = FlatVector::GetData<uint8_t>(result);
+                    auto result_data_u8 = FlatVector::GetDataMutable<uint8_t>(result);
                     encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u8 + i);
                     break;
                 }
                 case 2:
                 {
-                    auto result_data_u16 = FlatVector::GetData<uint16_t>(result);
+                    auto result_data_u16 = FlatVector::GetDataMutable<uint16_t>(result);
                     encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u16 + i);
                     break;
                 }
                 case 3:
                 case 4:
                 {
-                    auto result_data_u32 = FlatVector::GetData<uint32_t>(result);
+                    auto result_data_u32 = FlatVector::GetDataMutable<uint32_t>(result);
                     encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u32 + i);
                     break;
                 }
@@ -881,7 +888,7 @@ namespace duckdb
                 case 7:
                 case 8:
                 {
-                    auto result_data_u64 = FlatVector::GetData<uint64_t>(result);
+                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
                     encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u64 + i);
                     break;
                 }
@@ -894,7 +901,7 @@ namespace duckdb
                 case 15:
                 case 16:
                 {
-                    auto result_data_u128 = FlatVector::GetData<uhugeint_t>(result);
+                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
                     encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u128 + i);
                     break;
                 }
@@ -924,6 +931,10 @@ namespace duckdb
 
         hilbert_encode.AddFunction(SF({LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid())}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
         morton_encode.AddFunction(SF({LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid())}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
+
+        // Encoding throws on arrays that contain NULL values.
+        hilbert_encode.SetFallible();
+        morton_encode.SetFallible();
 
         // Register hilbert_encode with documentation
         CreateScalarFunctionInfo hilbert_encode_info(hilbert_encode);
@@ -969,6 +980,10 @@ namespace duckdb
                                lindelDecodeArrayFun,
                                lindelDecodeToArrayBind));
         }
+
+        // Decoding throws on unsupported input/output types.
+        hilbert_decode.SetFallible();
+        morton_decode.SetFallible();
 
         // Register hilbert_decode with documentation
         CreateScalarFunctionInfo hilbert_decode_info(hilbert_decode);
