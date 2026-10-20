@@ -288,7 +288,7 @@ namespace duckdb
     };
 
     // Helper function to get input data pointer and increment size
-    inline DecodeInputDataInfo getDecodeInputDataInfo(Vector &input_vector)
+    inline DecodeInputDataInfo getDecodeInputDataInfo(Vector &input_vector, const UnifiedVectorFormat &input_format)
     {
         void *data_ptr = NULL;
         size_t increment = 0;
@@ -296,43 +296,43 @@ namespace duckdb
         switch (input_vector.GetType().id())
         {
         case LogicalTypeId::UTINYINT:
-            data_ptr = FlatVector::GetData<uint8_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uint8_t>(input_format);
             increment = sizeof(uint8_t);
             break;
         case LogicalTypeId::TINYINT:
-            data_ptr = FlatVector::GetData<int8_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<int8_t>(input_format);
             increment = sizeof(int8_t);
             break;
         case LogicalTypeId::USMALLINT:
-            data_ptr = FlatVector::GetData<uint16_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uint16_t>(input_format);
             increment = sizeof(uint16_t);
             break;
         case LogicalTypeId::SMALLINT:
-            data_ptr = FlatVector::GetData<int16_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<int16_t>(input_format);
             increment = sizeof(int16_t);
             break;
         case LogicalTypeId::UINTEGER:
-            data_ptr = FlatVector::GetData<uint32_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uint32_t>(input_format);
             increment = sizeof(uint32_t);
             break;
         case LogicalTypeId::INTEGER:
-            data_ptr = FlatVector::GetData<int32_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<int32_t>(input_format);
             increment = sizeof(int32_t);
             break;
         case LogicalTypeId::UBIGINT:
-            data_ptr = FlatVector::GetData<uint64_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uint64_t>(input_format);
             increment = sizeof(uint64_t);
             break;
         case LogicalTypeId::BIGINT:
-            data_ptr = FlatVector::GetData<int64_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<int64_t>(input_format);
             increment = sizeof(int64_t);
             break;
         case LogicalTypeId::UHUGEINT:
-            data_ptr = FlatVector::GetData<uhugeint_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<uhugeint_t>(input_format);
             increment = sizeof(uhugeint_t);
             break;
         case LogicalTypeId::HUGEINT:
-            data_ptr = FlatVector::GetData<hugeint_t>(input_vector);
+            data_ptr = (void *)UnifiedVectorFormat::GetData<hugeint_t>(input_format);
             increment = sizeof(hugeint_t);
             break;
         default:
@@ -469,7 +469,7 @@ namespace duckdb
         left.ToUnifiedFormat(args.size(), left_format);
 
         // Get typed pointers and metadata for input and output
-        DecodeInputDataInfo input_info = getDecodeInputDataInfo(left);
+        DecodeInputDataInfo input_info = getDecodeInputDataInfo(left, left_format);
         DecodeOutputDataInfo output_info = getDecodeOutputDataInfo(result, output_child_type);
 
         // Process each row

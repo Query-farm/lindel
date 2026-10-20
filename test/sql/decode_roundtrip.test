@@ -246,3 +246,22 @@ true	true
 endloop
 
 endloop
+
+# Decode must read non-flat inputs (dictionary vectors from a join, constant vectors) correctly
+foreach curve hilbert morton
+
+query I
+WITH enc AS (SELECT i, ${curve}_encode([i % 50, i % 7]::UINTEGER[2]) AS h FROM range(5000) t(i)),
+keys AS (SELECT DISTINCT i % 13 AS k FROM range(5000) t(i))
+SELECT count(*) FROM enc JOIN keys ON enc.i % 13 = keys.k
+WHERE ${curve}_decode(h, 2, false, true) != [i % 50, i % 7]::UINTEGER[2];
+----
+0
+
+query I
+SELECT count(*) FROM range(5000) t(i)
+WHERE ${curve}_decode(${curve}_encode([3, 4]::UINTEGER[2]), 2, false, true) != [3, 4]::UINTEGER[2];
+----
+0
+
+endloop
