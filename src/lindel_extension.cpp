@@ -19,6 +19,11 @@
 namespace duckdb
 {
 
+//! A positional-only parameter with a real name (bare types would be reported as col0, col1, ...)
+static FunctionParameter Positional(const char *name, LogicalType type) {
+	return FunctionParameter(name, std::move(type), {}, FunctionParameterKind::POSITIONAL_ONLY);
+}
+
     // Since we have functions that can decode or encode using two different types of encoding to reduce
     // the number of functions we need to write we'll use a single function to handle both.
     // and just store the encoding type in the bind_info.
@@ -929,8 +934,8 @@ namespace duckdb
 
         using SF = ScalarFunction; // Alias for ScalarFunction
 
-        hilbert_encode.AddFunction(SF({LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid())}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
-        morton_encode.AddFunction(SF({LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid())}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
+        hilbert_encode.AddFunction(SF({Positional("values", LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()))}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
+        morton_encode.AddFunction(SF({Positional("values", LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()))}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
 
         // Encoding throws on arrays that contain NULL values.
         hilbert_encode.SetFallible();
@@ -971,12 +976,12 @@ namespace duckdb
         for (const auto &decodable_type : types_that_can_be_decoded)
         {
             hilbert_decode.AddFunction(
-                ScalarFunction({decodable_type, LogicalType(LogicalTypeId::UTINYINT), LogicalType(LogicalTypeId::BOOLEAN), LogicalType(LogicalTypeId::BOOLEAN)}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
+                ScalarFunction({Positional("encoded_value", decodable_type), Positional("num_elements", LogicalType(LogicalTypeId::UTINYINT)), Positional("return_float", LogicalType(LogicalTypeId::BOOLEAN)), Positional("return_unsigned", LogicalType(LogicalTypeId::BOOLEAN))}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
                                lindelDecodeArrayFun,
                                lindelDecodeToArrayBind));
 
             morton_decode.AddFunction(
-                ScalarFunction({decodable_type, LogicalType(LogicalTypeId::UTINYINT), LogicalType(LogicalTypeId::BOOLEAN), LogicalType(LogicalTypeId::BOOLEAN)}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
+                ScalarFunction({Positional("encoded_value", decodable_type), Positional("num_elements", LogicalType(LogicalTypeId::UTINYINT)), Positional("return_float", LogicalType(LogicalTypeId::BOOLEAN)), Positional("return_unsigned", LogicalType(LogicalTypeId::BOOLEAN))}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
                                lindelDecodeArrayFun,
                                lindelDecodeToArrayBind));
         }
@@ -1011,7 +1016,7 @@ namespace duckdb
         morton_decode_info.descriptions.push_back(morton_decode_desc);
         loader.RegisterFunction(morton_decode_info);
 
-        QueryFarmSendTelemetry(loader, "lindel", "2026102001");
+        QueryFarmSendTelemetry(loader, "lindel", "2026102101");
     }
 
     void LindelExtension::Load(ExtensionLoader &loader)
@@ -1025,7 +1030,7 @@ namespace duckdb
 
     std::string LindelExtension::Version() const
     {
-        return "2026102001";
+        return "2026102101";
     }
 
 } // namespace duckdb

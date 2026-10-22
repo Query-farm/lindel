@@ -1,0 +1,46 @@
+# name: test/sql/lindel_parameter_names.test
+# description: every function parameter is reported with a real name, not col0, col1, ...
+# group: [sql]
+
+require lindel
+
+query IIT
+SELECT function_name, function_type, parameters FROM duckdb_functions()
+WHERE extension_name = 'lindel'
+ORDER BY function_name, function_type, len(parameters), parameter_types::VARCHAR;
+----
+hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+hilbert_encode	scalar	[values]
+morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+morton_encode	scalar	[values]
+
+# No parameter may fall back to a positional colN name
+query I
+SELECT count(*) FROM (SELECT unnest(parameters) AS p FROM duckdb_functions() WHERE extension_name = 'lindel')
+WHERE regexp_matches(p, '^col[0-9]+$');
+----
+0
+
+# Positional calls work as before
+query I
+SELECT hilbert_encode([1, 2, 3]::tinyint[3]);
+----
+22
+
+query I
+SELECT morton_encode([1, 2, 3]::tinyint[3]);
+----
+29
+
+query I
+SELECT hilbert_decode(hilbert_encode([1, 2, 3]::tinyint[3]), 3, false, false);
+----
+[1, 2, 3]
