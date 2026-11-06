@@ -13,5 +13,7 @@
 #endif
 
 namespace duckdb {
-void QueryFarmSendTelemetry(ExtensionLoader &loader, const string &extension_name, const string &extension_version);
+void QueryFarmSendTelemetry(ExtensionLoader &loader,
+                            const string &extension_name,
+                            const string &extension_version);
 }
