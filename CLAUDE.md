@@ -85,7 +85,11 @@ make test_debug              # Debug tests
 
 ## Key Files
 
-- `src/lindel_extension.cpp` - Main extension code with all DuckDB function implementations
+- `src/lindel_extension.cpp` - Extension entry point plus `hilbert_/morton_encode` (array and separate-argument forms) and `_decode`
+- `src/lindel_bounded.cpp` - `*_encode_bounded`/`*_decode_bounded` (quantized grid) and `*_encode_latlon`/`*_decode_latlon`
+- `src/lindel_ranges.cpp` - `*_ranges`/`*_ranges_bounded` table functions (box query -> key ranges)
+- `src/lindel_typed.cpp` - `hilbert_/morton_decode(key, 'TYPE[n]')` overload that decodes into a named type
+- `src/include/lindel_common.hpp` - Shared helpers: order-preserving key transform, key types, grid encode/decode via the Rust FFI
 - `duckdb_lindel_rust/src/lib.rs` - Rust encoding/decoding implementations
-- `src/include/rust.h` - Auto-generated C++ headers for Rust FFI (regenerate with `make rust_binding_headers`)
+- `src/include/rust.h` - Auto-generated C++ headers for Rust FFI (regenerate with `RUSTUP_TOOLCHAIN=nightly make rust_binding_headers`; cbindgen's macro expansion needs nightly)
 - `duckdb_lindel_rust/cbindgen.toml` - Configuration for header generation

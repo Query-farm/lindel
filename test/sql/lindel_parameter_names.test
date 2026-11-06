@@ -9,18 +9,42 @@ SELECT function_name, function_type, parameters FROM duckdb_functions()
 WHERE extension_name = 'lindel'
 ORDER BY function_name, function_type, len(parameters), parameter_types::VARCHAR;
 ----
+hilbert_decode	scalar	[encoded_value, target_type]
 hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
 hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
 hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
 hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
 hilbert_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+hilbert_decode_bounded	scalar	[encoded_value, min_values, max_values, bits]
+hilbert_decode_latlon	scalar	[encoded_value]
+hilbert_decode_latlon	scalar	[encoded_value, bits]
 hilbert_encode	scalar	[values]
+hilbert_encode	scalar	[x, y]
+hilbert_encode_bounded	scalar	[values, min_values, max_values, bits]
+hilbert_encode_latlon	scalar	[latitude, longitude]
+hilbert_encode_latlon	scalar	[latitude, longitude, bits]
+hilbert_ranges	table	[min_point, max_point]
+hilbert_ranges	table	[min_point, max_point, max_ranges]
+hilbert_ranges_bounded	table	[min_point, max_point, min_values, max_values, bits]
+hilbert_ranges_bounded	table	[min_point, max_point, min_values, max_values, bits, max_ranges]
+morton_decode	scalar	[encoded_value, target_type]
 morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
 morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
 morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
 morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
 morton_decode	scalar	[encoded_value, num_elements, return_float, return_unsigned]
+morton_decode_bounded	scalar	[encoded_value, min_values, max_values, bits]
+morton_decode_latlon	scalar	[encoded_value]
+morton_decode_latlon	scalar	[encoded_value, bits]
 morton_encode	scalar	[values]
+morton_encode	scalar	[x, y]
+morton_encode_bounded	scalar	[values, min_values, max_values, bits]
+morton_encode_latlon	scalar	[latitude, longitude]
+morton_encode_latlon	scalar	[latitude, longitude, bits]
+morton_ranges	table	[min_point, max_point]
+morton_ranges	table	[min_point, max_point, max_ranges]
+morton_ranges_bounded	table	[min_point, max_point, min_values, max_values, bits]
+morton_ranges_bounded	table	[min_point, max_point, min_values, max_values, bits, max_ranges]
 
 # No parameter may fall back to a positional colN name
 query I
@@ -31,16 +55,16 @@ WHERE regexp_matches(p, '^col[0-9]+$');
 
 # Positional calls work as before
 query I
-SELECT hilbert_encode([1, 2, 3]::tinyint[3]);
+SELECT hilbert_encode([1, 2, 3]::utinyint[3]);
 ----
 22
 
 query I
-SELECT morton_encode([1, 2, 3]::tinyint[3]);
+SELECT morton_encode([1, 2, 3]::utinyint[3]);
 ----
 29
 
 query I
-SELECT hilbert_decode(hilbert_encode([1, 2, 3]::tinyint[3]), 3, false, false);
+SELECT hilbert_decode(hilbert_encode([1, 2, 3]::utinyint[3]), 3, false, true);
 ----
 [1, 2, 3]

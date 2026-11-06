@@ -1,6 +1,6 @@
 # name: test/sql/decode_roundtrip.test
 # description: Preserve coordinate types and bits when decoding encoded keys
-# group: [lindel]
+# group: [sql]
 
 require lindel
 
@@ -108,15 +108,17 @@ SELECT {curve}_decode({curve}_encode([-1.5]::FLOAT[1]), 1, true, true) = [-1.5]:
 ----
 true
 
-# Four byte-sized coordinates produce a UINTEGER key.
-foreach type TINYINT UTINYINT
-
+# Four byte-sized coordinates produce a UINTEGER key. Signedness must match on decode,
+# because signed coordinates are stored with their sign bit flipped to keep them ordered.
 query I
-SELECT {curve}_decode({curve}_encode([1, 2, 3, 4]::{type}[4]), 4, false, false) = [1, 2, 3, 4]::TINYINT[4];
+SELECT {curve}_decode({curve}_encode([-1, 2, -3, 4]::TINYINT[4]), 4, false, false) = [-1, 2, -3, 4]::TINYINT[4];
 ----
 true
 
-endloop
+query I
+SELECT {curve}_decode({curve}_encode([1, 2, 3, 255]::UTINYINT[4]), 4, false, true) = [1, 2, 3, 255]::UTINYINT[4];
+----
+true
 
 # A 32-bit key contains only one FLOAT, regardless of the requested part count.
 statement error

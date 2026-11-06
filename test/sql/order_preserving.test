@@ -1,0 +1,128 @@
+# name: test/sql/order_preserving.test
+# description: Keys of signed and floating point coordinates sort like the coordinates themselves
+# group: [sql]
+
+require lindel
+
+foreach curve hilbert morton
+
+# One-dimensional keys sort exactly like the values they encode, across zero and at the type limits.
+query I
+WITH v AS (SELECT range::TINYINT AS x FROM range(-128, 128)),
+k AS (SELECT x, {curve}_encode([x]::TINYINT[1]) AS k FROM v)
+SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY x) AS a, row_number() OVER (ORDER BY k) AS b FROM k) WHERE a <> b;
+----
+0
+
+query I
+WITH v AS (SELECT range::SMALLINT AS x FROM range(-32768, 32768)),
+k AS (SELECT x, {curve}_encode([x]::SMALLINT[1]) AS k FROM v)
+SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY x) AS a, row_number() OVER (ORDER BY k) AS b FROM k) WHERE a <> b;
+----
+0
+
+query I
+WITH v AS (SELECT range::INTEGER AS x FROM range(-1000, 1001) UNION ALL SELECT * FROM (VALUES ('-2147483648'::INTEGER), ('2147483647'::INTEGER))),
+k AS (SELECT x, {curve}_encode([x]::INTEGER[1]) AS k FROM v)
+SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY x) AS a, row_number() OVER (ORDER BY k) AS b FROM k) WHERE a <> b;
+----
+0
+
+query I
+WITH v AS (SELECT range::BIGINT AS x FROM range(-1000, 1001) UNION ALL SELECT * FROM (VALUES ('-9223372036854775808'::BIGINT), ('9223372036854775807'::BIGINT))),
+k AS (SELECT x, {curve}_encode([x]::BIGINT[1]) AS k FROM v)
+SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY x) AS a, row_number() OVER (ORDER BY k) AS b FROM k) WHERE a <> b;
+----
+0
+
+# Floats: negative values, fractions, subnormal-scale values and infinities.
+# (-0.0 is left out because it compares equal to 0.0; it is checked separately below.)
+foreach type FLOAT DOUBLE
+
+query I
+WITH v AS (
+  SELECT (range / 7.0)::{type} AS x FROM range(-1000, 1001)
+  UNION ALL SELECT v::{type} FROM (VALUES ('-inf'), ('-1e30'), ('-1e-30'), ('1e-30'), ('1e30'), ('inf')) t(v)),
+k AS (SELECT x, {curve}_encode([x]::{type}[1]) AS k FROM v)
+SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY x) AS a, row_number() OVER (ORDER BY k) AS b FROM k) WHERE a <> b;
+----
+0
+
+# -0.0 sorts immediately before +0.0 and still round-trips to -0.0.
+query II
+SELECT {curve}_encode(['-0.0'::{type}]::{type}[1]) < {curve}_encode(['0.0'::{type}]::{type}[1]),
+       {curve}_decode({curve}_encode(['-0.0'::{type}]::{type}[1]), 1, true, false)[1]::VARCHAR;
+----
+true	-0.0
+
+endloop
+
+# The most negative value maps to the smallest key, zero to the middle of the key space.
+query IIII
+SELECT {curve}_encode([-128]::TINYINT[1]), {curve}_encode([-1]::TINYINT[1]),
+       {curve}_encode([0]::TINYINT[1]), {curve}_encode([127]::TINYINT[1]);
+----
+0	127	128	255
+
+# Multi-dimensional signed coordinates round-trip through the order-preserving mapping.
+query I
+WITH pts AS (SELECT [x, y]::INTEGER[2] AS p FROM range(-50, 51, 5) a(x), range(-50, 51, 5) b(y))
+SELECT bool_and({curve}_decode({curve}_encode(p), 2, false, false) = p) FROM pts;
+----
+true
+
+query I
+WITH pts AS (SELECT [x / 4.0, y / 4.0]::DOUBLE[2] AS p FROM range(-50, 51, 5) a(x), range(-50, 51, 5) b(y))
+SELECT bool_and({curve}_decode({curve}_encode(p), 2, true, false) = p) FROM pts;
+----
+true
+
+endloop
+
+# Error messages name the function that was called (the NULL message used to always say hilbert_encode).
+statement error
+SELECT morton_encode([1, NULL]::INTEGER[2]);
+----
+morton_encode: array can not contain NULL values
+
+statement error
+SELECT hilbert_encode([1, NULL]::INTEGER[2]);
+----
+hilbert_encode: array can not contain NULL values
+
+statement error
+SELECT morton_encode([1, 2, 3]::DOUBLE[3]);
+----
+morton_encode() only supports arrays of length 1-2 for DOUBLE, got 3
+
+statement error
+SELECT hilbert_encode(range(17)::TINYINT[17]);
+----
+hilbert_encode() only supports arrays of length 1-16 for TINYINT, got 17
+
+statement error
+SELECT hilbert_encode(['a', 'b']::VARCHAR[2]);
+----
+hilbert_encode() only supports arrays of integer, FLOAT, DOUBLE, BOOLEAN, DATE, TIME, TIMESTAMP, DECIMAL (up to 18 digits) or ENUM values, not VARCHAR
+
+# A Morton key increases with each coordinate while the others stay fixed. With raw two's
+# complement bits this broke at zero (-1 encoded above every non-negative value).
+foreach type TINYINT INTEGER BIGINT DOUBLE
+
+query I
+WITH pts AS (
+  SELECT x::{type} AS x, y::{type} AS y, morton_encode([x, y]::{type}[2]) AS k
+  FROM range(-20, 21) a(x), range(-20, 21) b(y))
+SELECT count(*) FROM pts p JOIN pts q ON p.y = q.y AND p.x < q.x WHERE p.k >= q.k;
+----
+0
+
+query I
+WITH pts AS (
+  SELECT x::{type} AS x, y::{type} AS y, morton_encode([x, y]::{type}[2]) AS k
+  FROM range(-20, 21) a(x), range(-20, 21) b(y))
+SELECT count(*) FROM pts p JOIN pts q ON p.x = q.x AND p.y < q.y WHERE p.k >= q.k;
+----
+0
+
+endloop

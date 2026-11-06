@@ -15,1031 +15,1025 @@
 
 // Include the declarations of things from Rust.
 #include "rust.h"
+#include "lindel_common.hpp"
 #include "query_farm_telemetry.hpp"
-namespace duckdb
-{
+namespace duckdb {
 
-//! A positional-only parameter with a real name (bare types would be reported as col0, col1, ...)
-static FunctionParameter Positional(const char *name, LogicalType type) {
-	return FunctionParameter(name, std::move(type), {}, FunctionParameterKind::POSITIONAL_ONLY);
+// Since we have functions that can decode or encode using two different types
+// of encoding to reduce the number of functions we need to write we'll use a
+// single function to handle both. and just store the encoding type in the
+// bind_info.
+//
+// The encoding type is 0 for Hilbert and 1 for Morton.
+//
+// This extension supports two different types of encoding, Hilbert and Morton.
+//
+// In both cases the encoding is done in a similar way, the only difference is
+// the encoding function that is called.
+//
+// Rather than writing two separate functions for each encoding type we'll write
+// a single function that can handle both and just store the encoding type in
+// the bind_info object.
+//
+// The bind_info object is created before the functions are called but when
+// DuckDB starts to evaluate the expression.
+struct lindelEncodingBindData : public FunctionData {
+  uint8_t encoding_type;
+  //! true when the coordinates are separate arguments rather than one array
+  bool columns;
+  lindelEncodingBindData(uint8_t encoding_type_p, bool columns_p = false)
+      : FunctionData(), encoding_type(encoding_type_p), columns(columns_p) {}
+
+  duckdb::unique_ptr<FunctionData> Copy() const override {
+    return make_uniq<lindelEncodingBindData>(encoding_type, columns);
+  }
+
+  bool Equals(const FunctionData &other_p) const override {
+    auto &other = other_p.Cast<lindelEncodingBindData>();
+    return encoding_type == other.encoding_type && columns == other.columns;
+  }
+};
+
+// Lookup table entry for decode type mapping
+struct DecodeTypeMapping {
+  LogicalTypeId input_type;
+  uint8_t num_parts;
+  LogicalTypeId unsigned_output;
+  LogicalTypeId signed_output;
+};
+
+// Static lookup table for integer decode type mappings
+// Maps (input_type, num_parts) -> (unsigned_output_type, signed_output_type)
+static const DecodeTypeMapping DECODE_TYPE_MAPPINGS[] = {
+    // One-dimensional encodings are unsigned keys even for signed coordinates.
+    {LogicalTypeId::UTINYINT, 1, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::USMALLINT, 1, LogicalTypeId::USMALLINT,
+     LogicalTypeId::SMALLINT},
+    {LogicalTypeId::UINTEGER, 1, LogicalTypeId::UINTEGER,
+     LogicalTypeId::INTEGER},
+    {LogicalTypeId::UBIGINT, 1, LogicalTypeId::UBIGINT, LogicalTypeId::BIGINT},
+
+    // USMALLINT: 2 parts only
+    {LogicalTypeId::USMALLINT, 2, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+
+    // UINTEGER: 2-4 parts
+    {LogicalTypeId::UINTEGER, 2, LogicalTypeId::USMALLINT,
+     LogicalTypeId::SMALLINT},
+    {LogicalTypeId::UINTEGER, 3, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UINTEGER, 4, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+
+    // UBIGINT: 2-8 parts
+    {LogicalTypeId::UBIGINT, 2, LogicalTypeId::UINTEGER,
+     LogicalTypeId::INTEGER},
+    {LogicalTypeId::UBIGINT, 3, LogicalTypeId::USMALLINT,
+     LogicalTypeId::SMALLINT},
+    {LogicalTypeId::UBIGINT, 4, LogicalTypeId::USMALLINT,
+     LogicalTypeId::SMALLINT},
+    {LogicalTypeId::UBIGINT, 5, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UBIGINT, 6, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UBIGINT, 7, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UBIGINT, 8, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+
+    // UHUGEINT: 2-16 parts
+    {LogicalTypeId::UHUGEINT, 2, LogicalTypeId::UBIGINT, LogicalTypeId::BIGINT},
+    {LogicalTypeId::UHUGEINT, 3, LogicalTypeId::UINTEGER,
+     LogicalTypeId::INTEGER},
+    {LogicalTypeId::UHUGEINT, 4, LogicalTypeId::UINTEGER,
+     LogicalTypeId::INTEGER},
+    {LogicalTypeId::UHUGEINT, 5, LogicalTypeId::USMALLINT,
+     LogicalTypeId::SMALLINT},
+    {LogicalTypeId::UHUGEINT, 6, LogicalTypeId::USMALLINT,
+     LogicalTypeId::SMALLINT},
+    {LogicalTypeId::UHUGEINT, 7, LogicalTypeId::USMALLINT,
+     LogicalTypeId::SMALLINT},
+    {LogicalTypeId::UHUGEINT, 8, LogicalTypeId::USMALLINT,
+     LogicalTypeId::SMALLINT},
+    {LogicalTypeId::UHUGEINT, 9, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UHUGEINT, 10, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UHUGEINT, 11, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UHUGEINT, 12, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UHUGEINT, 13, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UHUGEINT, 14, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UHUGEINT, 15, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+    {LogicalTypeId::UHUGEINT, 16, LogicalTypeId::UTINYINT,
+     LogicalTypeId::TINYINT},
+};
+
+// Helper function to find the output type for a given input type and number of
+// parts
+static bool FindDecodeOutputType(LogicalTypeId input_type, uint8_t num_parts,
+                                 bool return_unsigned,
+                                 LogicalType &output_type) {
+  for (const auto &mapping : DECODE_TYPE_MAPPINGS) {
+    if (mapping.input_type == input_type && mapping.num_parts == num_parts) {
+      output_type = LogicalType(return_unsigned ? mapping.unsigned_output
+                                                : mapping.signed_output);
+      return true;
+    }
+  }
+  return false;
 }
 
-    // Since we have functions that can decode or encode using two different types of encoding to reduce
-    // the number of functions we need to write we'll use a single function to handle both.
-    // and just store the encoding type in the bind_info.
-    //
-    // The encoding type is 0 for Hilbert and 1 for Morton.
-    //
-    // This extension supports two different types of encoding, Hilbert and Morton.
-    //
-    // In both cases the encoding is done in a similar way, the only difference is the
-    // encoding function that is called.
-    //
-    // Rather than writing two separate functions for each encoding type we'll write a single
-    // function that can handle both and just store the encoding type in the bind_info object.
-    //
-    // The bind_info object is created before the functions are called but when DuckDB starts to evaluate
-    // the expression.
-    struct lindelEncodingBindData : public FunctionData
-    {
-        uint8_t encoding_type;
-        lindelEncodingBindData(uint8_t encoding_type_p) : FunctionData(), encoding_type(encoding_type_p)
-        {
-        }
+// Helper function to get valid part range description for error messages
+static string GetValidPartsDescription(LogicalTypeId input_type) {
+  switch (input_type) {
+  case LogicalTypeId::UTINYINT:
+    return "1";
+  case LogicalTypeId::USMALLINT:
+    return "1-2";
+  case LogicalTypeId::UINTEGER:
+    return "1-4";
+  case LogicalTypeId::UBIGINT:
+    return "1-8";
+  case LogicalTypeId::UHUGEINT:
+    return "2-16";
+  default:
+    return "unknown";
+  }
+}
 
-        duckdb::unique_ptr<FunctionData> Copy() const override
-        {
-            return make_uniq<lindelEncodingBindData>(encoding_type);
-        }
+// This is the "bind" fucntion that is called when we are decoding an array of
+// values.
+//
+// In SQL this will be a function of the form:
+//
+// hilbert_decode(UTINYINT|USMALLINT|UINTEGER|UBIGINT|UHUGEINT, TINYINT,
+// BOOLEAN) morton_decode(UTINYINT|USMALLINT|UINTEGER|UBIGINT|UHUGEINT, TINYINT,
+// BOOLEAN)
+//
+// The arguments are as follows:
+//
+// 1. The value to decode.
+// 2. The number of parts to return.
+// 3. Whether or not to return the parts as floats or integers.
+// 4. Whether or not to return unsigned integers (true if unsigned)
+//
+// This binding function also needs to determine the encoding type by looking at
+// the bound function name.
+//
+// This function also determines the actual type that will be returned by the
+// function, it will always be an array but the type of element and number of
+// elements will depend on the input type and what the caller requests.
+//
+static unique_ptr<FunctionData>
+lindelDecodeToArrayBind(BindScalarFunctionInput &input) {
+  auto &context = input.GetClientContext();
+  auto &bound_function = input.GetBoundFunction();
+  auto &arguments = input.GetArguments();
+  unique_ptr<lindelEncodingBindData> bind_data =
+      make_uniq<lindelEncodingBindData>(0);
+  if (bound_function.GetName() == "hilbert_decode") {
+    bind_data->encoding_type = 0;
+  } else if (bound_function.GetName() == "morton_decode") {
+    bind_data->encoding_type = 1;
+  } else {
+    throw NotImplementedException(
+        "Unknown function name in lindelDecodeToArrayBind, expected either "
+        "hilbert_decode() or morton_decode()");
+  }
 
-        bool Equals(const FunctionData &other_p) const override
-        {
-            auto &other = other_p.Cast<lindelEncodingBindData>();
-            return encoding_type == other.encoding_type;
-        }
-    };
+  auto &left_type = arguments[0]->GetReturnType();
 
-    // Lookup table entry for decode type mapping
-    struct DecodeTypeMapping
-    {
-        LogicalTypeId input_type;
-        uint8_t num_parts;
-        LogicalTypeId unsigned_output;
-        LogicalTypeId signed_output;
-    };
+  auto get_foldable_value = [&](size_t index, LogicalType expected_type,
+                                const string &error_msg) -> Value {
+    if (!arguments[index]->IsFoldable()) {
+      throw NotImplementedException(error_msg);
+    }
+    Value val = ExpressionExecutor::EvaluateScalar(context, *arguments[index])
+                    .CastAs(context, expected_type);
+    if (val.IsNull()) {
+      throw NotImplementedException(error_msg + " expected a not-null value");
+    }
+    return val;
+  };
 
-    // Static lookup table for integer decode type mappings
-    // Maps (input_type, num_parts) -> (unsigned_output_type, signed_output_type)
-    static const DecodeTypeMapping DECODE_TYPE_MAPPINGS[] = {
-        // One-dimensional encodings are unsigned keys even for signed coordinates.
-        {LogicalTypeId::UTINYINT, 1, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::USMALLINT, 1, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
-        {LogicalTypeId::UINTEGER, 1, LogicalTypeId::UINTEGER, LogicalTypeId::INTEGER},
-        {LogicalTypeId::UBIGINT, 1, LogicalTypeId::UBIGINT, LogicalTypeId::BIGINT},
+  auto return_number_of_parts = UTinyIntValue::Get(
+      get_foldable_value(1, LogicalType(LogicalTypeId::UTINYINT),
+                         "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
+  auto return_float = BooleanValue::Get(
+      get_foldable_value(2, LogicalType(LogicalTypeId::BOOLEAN),
+                         "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
+  auto return_unsigned = BooleanValue::Get(
+      get_foldable_value(3, LogicalType(LogicalTypeId::BOOLEAN),
+                         "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
 
-        // USMALLINT: 2 parts only
-        {LogicalTypeId::USMALLINT, 2, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+  if (return_number_of_parts == 0) {
+    throw InvalidInputException(
+        "Number of parts to return must be greater than 0.");
+  }
 
-        // UINTEGER: 2-4 parts
-        {LogicalTypeId::UINTEGER, 2, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
-        {LogicalTypeId::UINTEGER, 3, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UINTEGER, 4, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+  auto set_return_type = [&](LogicalType base_type, size_t parts,
+                             string_t allowed_types,
+                             const vector<LogicalType> &type_options) {
+    if (find(type_options.begin(), type_options.end(), left_type.id()) ==
+        type_options.end()) {
+      throw InvalidInputException("Expected one of the following types:" +
+                                  allowed_types.GetString());
+    }
+    bound_function.SetReturnType(LogicalType::ARRAY(base_type, parts));
+  };
 
-        // UBIGINT: 2-8 parts
-        {LogicalTypeId::UBIGINT, 2, LogicalTypeId::UINTEGER, LogicalTypeId::INTEGER},
-        {LogicalTypeId::UBIGINT, 3, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
-        {LogicalTypeId::UBIGINT, 4, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
-        {LogicalTypeId::UBIGINT, 5, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UBIGINT, 6, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UBIGINT, 7, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UBIGINT, 8, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
+  if (return_float) {
+    switch (left_type.id()) {
+    case LogicalTypeId::UINTEGER:
+      if (return_number_of_parts != 1) {
+        throw InvalidInputException(
+            "Expected 1 part for UINTEGER when returning floats");
+      }
+      set_return_type(LogicalType(LogicalTypeId::FLOAT), 1, "UINTEGER",
+                      {LogicalType(LogicalTypeId::UINTEGER)});
+      break;
+    case LogicalTypeId::UBIGINT:
+      if (return_number_of_parts == 1) {
+        set_return_type(LogicalType(LogicalTypeId::DOUBLE), 1, "UBIGINT",
+                        {LogicalType(LogicalTypeId::UBIGINT)});
+      } else if (return_number_of_parts == 2) {
+        set_return_type(LogicalType(LogicalTypeId::FLOAT), 2, "UBIGINT",
+                        {LogicalType(LogicalTypeId::UBIGINT)});
+      } else {
+        throw InvalidInputException("Expected 1 or 2 parts for UBIGINT");
+      }
+      break;
+    case LogicalTypeId::UHUGEINT:
+      if (return_number_of_parts == 2) {
+        set_return_type(LogicalType(LogicalTypeId::DOUBLE), 2, "UHUGEINT",
+                        {LogicalType(LogicalTypeId::UHUGEINT)});
+      } else if (return_number_of_parts >= 3 && return_number_of_parts <= 4) {
+        set_return_type(LogicalType(LogicalTypeId::FLOAT),
+                        return_number_of_parts, "UHUGEINT",
+                        {LogicalType(LogicalTypeId::UHUGEINT)});
+      } else {
+        throw InvalidInputException("Expected 2-4 parts for UHUGEINT");
+      }
+      break;
+    default:
+      throw InvalidInputException("Expected UINTEGER, UBIGINT, or UHUGEINT");
+    }
+    return bind_data;
+  }
 
-        // UHUGEINT: 2-16 parts
-        {LogicalTypeId::UHUGEINT, 2, LogicalTypeId::UBIGINT, LogicalTypeId::BIGINT},
-        {LogicalTypeId::UHUGEINT, 3, LogicalTypeId::UINTEGER, LogicalTypeId::INTEGER},
-        {LogicalTypeId::UHUGEINT, 4, LogicalTypeId::UINTEGER, LogicalTypeId::INTEGER},
-        {LogicalTypeId::UHUGEINT, 5, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
-        {LogicalTypeId::UHUGEINT, 6, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
-        {LogicalTypeId::UHUGEINT, 7, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
-        {LogicalTypeId::UHUGEINT, 8, LogicalTypeId::USMALLINT, LogicalTypeId::SMALLINT},
-        {LogicalTypeId::UHUGEINT, 9, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UHUGEINT, 10, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UHUGEINT, 11, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UHUGEINT, 12, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UHUGEINT, 13, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UHUGEINT, 14, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UHUGEINT, 15, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-        {LogicalTypeId::UHUGEINT, 16, LogicalTypeId::UTINYINT, LogicalTypeId::TINYINT},
-    };
+  // Use the lookup table to find the output type
+  LogicalType output_type;
+  if (FindDecodeOutputType(left_type.id(), return_number_of_parts,
+                           return_unsigned, output_type)) {
+    bound_function.SetReturnType(
+        LogicalType::ARRAY(output_type, return_number_of_parts));
+  } else {
+    throw InvalidInputException("Expected " +
+                                GetValidPartsDescription(left_type.id()) +
+                                " parts for " + left_type.ToString());
+  }
 
-    // Helper function to find the output type for a given input type and number of parts
-    static bool FindDecodeOutputType(LogicalTypeId input_type, uint8_t num_parts, bool return_unsigned, LogicalType &output_type)
-    {
-        for (const auto &mapping : DECODE_TYPE_MAPPINGS)
-        {
-            if (mapping.input_type == input_type && mapping.num_parts == num_parts)
-            {
-                output_type = LogicalType(return_unsigned ? mapping.unsigned_output : mapping.signed_output);
-                return true;
-            }
-        }
-        return false;
+  return bind_data;
+}
+
+// Struct to hold input data information
+struct DecodeInputDataInfo {
+  void *data_ptr;
+  size_t increment;
+
+  DecodeInputDataInfo(void *ptr, size_t inc) : data_ptr(ptr), increment(inc) {}
+};
+
+// Struct to hold output data information
+struct DecodeOutputDataInfo {
+  void *data_ptr;
+  size_t increment;
+  uint8_t bit_width;
+  OrderTransform transform;
+
+  DecodeOutputDataInfo(void *ptr, size_t inc, uint8_t width,
+                       OrderTransform transform_p)
+      : data_ptr(ptr), increment(inc), bit_width(width),
+        transform(transform_p) {}
+};
+
+// The inverse of the encode-side transform for each decoded coordinate type.
+static OrderTransform GetDecodeTransform(LogicalTypeId type) {
+  switch (type) {
+  case LogicalTypeId::TINYINT:
+  case LogicalTypeId::SMALLINT:
+  case LogicalTypeId::INTEGER:
+  case LogicalTypeId::BIGINT:
+    return OrderTransform::SIGNED;
+  case LogicalTypeId::FLOAT:
+  case LogicalTypeId::DOUBLE:
+    return OrderTransform::FLOAT;
+  default:
+    return OrderTransform::NONE;
+  }
+}
+
+template <class U>
+static void RestoreOrderedBits(void *location, idx_t count,
+                               OrderTransform transform) {
+  auto values = static_cast<U *>(location);
+  for (idx_t i = 0; i < count; i++) {
+    values[i] = FromOrderedBits<U>(values[i], transform);
+  }
+}
+
+// Helper function to get input data pointer and increment size
+inline DecodeInputDataInfo
+getDecodeInputDataInfo(const Vector &input_vector,
+                       const UnifiedVectorFormat &input_format) {
+  void *data_ptr = NULL;
+  size_t increment = 0;
+
+  switch (input_vector.GetType().id()) {
+  case LogicalTypeId::UTINYINT:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<uint8_t>(input_format);
+    increment = sizeof(uint8_t);
+    break;
+  case LogicalTypeId::TINYINT:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<int8_t>(input_format);
+    increment = sizeof(int8_t);
+    break;
+  case LogicalTypeId::USMALLINT:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<uint16_t>(input_format);
+    increment = sizeof(uint16_t);
+    break;
+  case LogicalTypeId::SMALLINT:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<int16_t>(input_format);
+    increment = sizeof(int16_t);
+    break;
+  case LogicalTypeId::UINTEGER:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<uint32_t>(input_format);
+    increment = sizeof(uint32_t);
+    break;
+  case LogicalTypeId::INTEGER:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<int32_t>(input_format);
+    increment = sizeof(int32_t);
+    break;
+  case LogicalTypeId::UBIGINT:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<uint64_t>(input_format);
+    increment = sizeof(uint64_t);
+    break;
+  case LogicalTypeId::BIGINT:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<int64_t>(input_format);
+    increment = sizeof(int64_t);
+    break;
+  case LogicalTypeId::UHUGEINT:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<uhugeint_t>(input_format);
+    increment = sizeof(uhugeint_t);
+    break;
+  case LogicalTypeId::HUGEINT:
+    data_ptr = (void *)UnifiedVectorFormat::GetData<hugeint_t>(input_format);
+    increment = sizeof(hugeint_t);
+    break;
+  default:
+    throw NotImplementedException(
+        "hilbert_decode()/morton_decode() only supports integer input types");
+  }
+
+  return DecodeInputDataInfo(data_ptr, increment);
+}
+
+// Helper function to get output data pointer, increment size, and bit width
+inline DecodeOutputDataInfo
+getDecodeOutputDataInfo(Vector &result, const LogicalType &output_child_type) {
+  auto &result_data_children = ArrayVector::GetChildMutable(result);
+  void *data_ptr = NULL;
+  size_t increment = 0;
+  uint8_t bit_width = 0;
+
+  switch (output_child_type.id()) {
+  case LogicalTypeId::UTINYINT:
+    data_ptr = FlatVector::GetDataMutable<uint8_t>(result_data_children);
+    increment = sizeof(uint8_t);
+    bit_width = 8;
+    break;
+  case LogicalTypeId::TINYINT:
+    data_ptr = FlatVector::GetDataMutable<int8_t>(result_data_children);
+    increment = sizeof(int8_t);
+    bit_width = 8;
+    break;
+  case LogicalTypeId::USMALLINT:
+    data_ptr = FlatVector::GetDataMutable<uint16_t>(result_data_children);
+    increment = sizeof(uint16_t);
+    bit_width = 16;
+    break;
+  case LogicalTypeId::SMALLINT:
+    data_ptr = FlatVector::GetDataMutable<int16_t>(result_data_children);
+    increment = sizeof(int16_t);
+    bit_width = 16;
+    break;
+  case LogicalTypeId::UINTEGER:
+    data_ptr = FlatVector::GetDataMutable<uint32_t>(result_data_children);
+    increment = sizeof(uint32_t);
+    bit_width = 32;
+    break;
+  case LogicalTypeId::INTEGER:
+    data_ptr = FlatVector::GetDataMutable<int32_t>(result_data_children);
+    increment = sizeof(int32_t);
+    bit_width = 32;
+    break;
+  case LogicalTypeId::FLOAT:
+    data_ptr = FlatVector::GetDataMutable<float>(result_data_children);
+    increment = sizeof(float);
+    bit_width = 32;
+    break;
+  case LogicalTypeId::UBIGINT:
+    data_ptr = FlatVector::GetDataMutable<uint64_t>(result_data_children);
+    increment = sizeof(uint64_t);
+    bit_width = 64;
+    break;
+  case LogicalTypeId::BIGINT:
+    data_ptr = FlatVector::GetDataMutable<int64_t>(result_data_children);
+    increment = sizeof(int64_t);
+    bit_width = 64;
+    break;
+  case LogicalTypeId::DOUBLE:
+    data_ptr = FlatVector::GetDataMutable<double>(
+        result_data_children); // Fixed: was int64_t
+    increment = sizeof(double);
+    bit_width = 64;
+    break;
+  case LogicalTypeId::UHUGEINT:
+    data_ptr = FlatVector::GetDataMutable<uhugeint_t>(result_data_children);
+    increment = sizeof(uhugeint_t);
+    bit_width = 128;
+    break;
+  case LogicalTypeId::HUGEINT:
+    data_ptr = FlatVector::GetDataMutable<hugeint_t>(result_data_children);
+    increment = sizeof(hugeint_t);
+    bit_width = 128;
+    break;
+  default:
+    throw NotImplementedException("hilbert_decode()/morton_decode() only "
+                                  "supports specified output types");
+  }
+
+  return DecodeOutputDataInfo(data_ptr, increment, bit_width,
+                              GetDecodeTransform(output_child_type.id()));
+}
+
+// Helper function to process all rows
+inline void decodeRows(const DataChunk &args,
+                       const UnifiedVectorFormat &left_format,
+                       const lindelEncodingBindData &bind_info,
+                       const DecodeInputDataInfo &input_info,
+                       const DecodeOutputDataInfo &output_info,
+                       idx_t output_number_of_elements, Vector &result) {
+  for (idx_t i = 0; i < args.size(); i++) {
+    auto left_idx = left_format.sel->get_index(i);
+
+    // If the input value is NULL then the output value should be NULL.
+    if (!left_format.validity.RowIsValid(left_idx)) {
+      FlatVector::SetNull(result, i, true);
+      continue;
     }
 
-    // Helper function to get valid part range description for error messages
-    static string GetValidPartsDescription(LogicalTypeId input_type)
-    {
-        switch (input_type)
-        {
-        case LogicalTypeId::UTINYINT:
-            return "1";
-        case LogicalTypeId::USMALLINT:
-            return "1-2";
-        case LogicalTypeId::UINTEGER:
-            return "1-4";
-        case LogicalTypeId::UBIGINT:
-            return "1-8";
-        case LogicalTypeId::UHUGEINT:
-            return "2-16";
-        default:
-            return "unknown";
-        }
+    // Calculate memory locations for this row
+    auto result_offset = i * output_number_of_elements;
+    void *output_location =
+        (char *)output_info.data_ptr + result_offset * output_info.increment;
+    void *source_location =
+        (char *)input_info.data_ptr + left_idx * input_info.increment;
+
+    // Perform the actual decoding
+    if (!perform_decode(bind_info.encoding_type, output_info.bit_width,
+                        source_location, output_location,
+                        output_number_of_elements)) {
+      throw InternalException(
+          "lindel: decoder rejected %llu elements of %u bits",
+          output_number_of_elements, output_info.bit_width);
     }
 
-    // This is the "bind" fucntion that is called when we are decoding an array of values.
-    //
-    // In SQL this will be a function of the form:
-    //
-    // hilbert_decode(UTINYINT|USMALLINT|UINTEGER|UBIGINT|UHUGEINT, TINYINT, BOOLEAN)
-    // morton_decode(UTINYINT|USMALLINT|UINTEGER|UBIGINT|UHUGEINT, TINYINT, BOOLEAN)
-    //
-    // The arguments are as follows:
-    //
-    // 1. The value to decode.
-    // 2. The number of parts to return.
-    // 3. Whether or not to return the parts as floats or integers.
-    // 4. Whether or not to return unsigned integers (true if unsigned)
-    //
-    // This binding function also needs to determine the encoding type by looking at the bound function name.
-    //
-    // This function also determines the actual type that will be returned by the function, it will always be an array
-    // but the type of element and number of elements will depend on the input type and what the caller requests.
-    //
-    static unique_ptr<FunctionData> lindelDecodeToArrayBind(BindScalarFunctionInput &input)
-    {
-        auto &context = input.GetClientContext();
-        auto &bound_function = input.GetBoundFunction();
-        auto &arguments = input.GetArguments();
-        unique_ptr<lindelEncodingBindData> bind_data = make_uniq<lindelEncodingBindData>(0);
-        if (bound_function.GetName() == "hilbert_decode")
-        {
-            bind_data->encoding_type = 0;
-        }
-        else if (bound_function.GetName() == "morton_decode")
-        {
-            bind_data->encoding_type = 1;
-        }
-        else
-        {
-            throw NotImplementedException("Unknown function name in lindelDecodeToArrayBind, expected either hilbert_decode() or morton_decode()");
-        }
-
-        auto &left_type = arguments[0]->GetReturnType();
-
-        auto get_foldable_value = [&](size_t index, LogicalType expected_type, const string &error_msg) -> Value
-        {
-            if (!arguments[index]->IsFoldable())
-            {
-                throw NotImplementedException(error_msg);
-            }
-            Value val = ExpressionExecutor::EvaluateScalar(context, *arguments[index]).CastAs(context, expected_type);
-            if (val.IsNull())
-            {
-                throw NotImplementedException(error_msg + " expected a not-null value");
-            }
-            return val;
-        };
-
-        auto return_number_of_parts = UTinyIntValue::Get(get_foldable_value(1, LogicalType(LogicalTypeId::UTINYINT), "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
-        auto return_float = BooleanValue::Get(get_foldable_value(2, LogicalType(LogicalTypeId::BOOLEAN), "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
-        auto return_unsigned = BooleanValue::Get(get_foldable_value(3, LogicalType(LogicalTypeId::BOOLEAN), "hilbert_decode(ANY, TINYINT, BOOLEAN, BOOLEAN)"));
-
-        if (return_number_of_parts == 0)
-        {
-            throw InvalidInputException("Number of parts to return must be greater than 0.");
-        }
-
-        auto set_return_type = [&](LogicalType base_type, size_t parts, string_t allowed_types, const vector<LogicalType> &type_options)
-        {
-            if (find(type_options.begin(), type_options.end(), left_type.id()) == type_options.end())
-            {
-                throw InvalidInputException("Expected one of the following types:" + allowed_types.GetString());
-            }
-            bound_function.SetReturnType(LogicalType::ARRAY(base_type, parts));
-        };
-
-        if (return_float)
-        {
-            switch (left_type.id())
-            {
-            case LogicalTypeId::UINTEGER:
-                if (return_number_of_parts != 1)
-                {
-                    throw InvalidInputException("Expected 1 part for UINTEGER when returning floats");
-                }
-                set_return_type(LogicalType(LogicalTypeId::FLOAT), 1, "UINTEGER", {LogicalType(LogicalTypeId::UINTEGER)});
-                break;
-            case LogicalTypeId::UBIGINT:
-                if (return_number_of_parts == 1)
-                {
-                    set_return_type(LogicalType(LogicalTypeId::DOUBLE), 1, "UBIGINT", {LogicalType(LogicalTypeId::UBIGINT)});
-                }
-                else if (return_number_of_parts == 2)
-                {
-                    set_return_type(LogicalType(LogicalTypeId::FLOAT), 2, "UBIGINT", {LogicalType(LogicalTypeId::UBIGINT)});
-                }
-                else
-                {
-                    throw InvalidInputException("Expected 1 or 2 parts for UBIGINT");
-                }
-                break;
-            case LogicalTypeId::UHUGEINT:
-                if (return_number_of_parts == 2)
-                {
-                    set_return_type(LogicalType(LogicalTypeId::DOUBLE), 2, "UHUGEINT", {LogicalType(LogicalTypeId::UHUGEINT)});
-                }
-                else if (return_number_of_parts >= 3 && return_number_of_parts <= 4)
-                {
-                    set_return_type(LogicalType(LogicalTypeId::FLOAT), return_number_of_parts, "UHUGEINT", {LogicalType(LogicalTypeId::UHUGEINT)});
-                }
-                else
-                {
-                    throw InvalidInputException("Expected 2-4 parts for UHUGEINT");
-                }
-                break;
-            default:
-                throw InvalidInputException("Expected UINTEGER, UBIGINT, or UHUGEINT");
-            }
-            return bind_data;
-        }
-
-        // Use the lookup table to find the output type
-        LogicalType output_type;
-        if (FindDecodeOutputType(left_type.id(), return_number_of_parts, return_unsigned, output_type))
-        {
-            bound_function.SetReturnType(LogicalType::ARRAY(output_type, return_number_of_parts));
-        }
-        else
-        {
-            throw InvalidInputException("Expected " + GetValidPartsDescription(left_type.id()) +
-                                        " parts for " + left_type.ToString());
-        }
-
-        return bind_data;
+    // Undo the order-preserving transform applied to signed and floating point
+    // coordinates.
+    switch (output_info.transform == OrderTransform::NONE
+                ? 0
+                : output_info.bit_width) {
+    case 8:
+      RestoreOrderedBits<uint8_t>(output_location, output_number_of_elements,
+                                  output_info.transform);
+      break;
+    case 16:
+      RestoreOrderedBits<uint16_t>(output_location, output_number_of_elements,
+                                   output_info.transform);
+      break;
+    case 32:
+      RestoreOrderedBits<uint32_t>(output_location, output_number_of_elements,
+                                   output_info.transform);
+      break;
+    case 64:
+      RestoreOrderedBits<uint64_t>(output_location, output_number_of_elements,
+                                   output_info.transform);
+      break;
+    default:
+      break;
     }
+  }
+}
 
-    // Struct to hold input data information
-    struct DecodeInputDataInfo
-    {
-        void *data_ptr;
-        size_t increment;
+// This function performs the actual decoding of values as a DuckDB scalar
+// function.
+//
+inline void lindelDecodeArrayFun(DataChunk &args, ExpressionState &state,
+                                 Vector &result) {
+  // This is the number of elements in the output array, not the number of rows
+  // being processed.
+  auto output_number_of_elements = ArrayType::GetSize(result.GetType());
 
-        DecodeInputDataInfo(void *ptr, size_t inc) : data_ptr(ptr), increment(inc) {}
-    };
+  // The type of the elements in the output array this will either be an integer
+  // type or a float type.
+  auto output_child_type = ArrayType::GetChildType(result.GetType());
 
-    // Struct to hold output data information
-    struct DecodeOutputDataInfo
-    {
-        void *data_ptr;
-        size_t increment;
-        uint8_t bit_width;
+  // Get a reference to the bind data that was already created that will
+  // determine the type of encoding to use.
+  auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+  auto &bind_info = func_expr.BindInfo()->Cast<lindelEncodingBindData>();
 
-        DecodeOutputDataInfo(void *ptr, size_t inc, uint8_t width)
-            : data_ptr(ptr), increment(inc), bit_width(width) {}
-    };
+  // Reference the source data.
+  auto &left = args.data[0];
 
-    // Helper function to get input data pointer and increment size
-    inline DecodeInputDataInfo getDecodeInputDataInfo(const Vector &input_vector, const UnifiedVectorFormat &input_format)
-    {
-        void *data_ptr = NULL;
-        size_t increment = 0;
+  // Standardize the vectors to a unified format, so it can be iterated.
+  UnifiedVectorFormat left_format;
+  left.ToUnifiedFormat(left_format);
 
-        switch (input_vector.GetType().id())
-        {
-        case LogicalTypeId::UTINYINT:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<uint8_t>(input_format);
-            increment = sizeof(uint8_t);
-            break;
-        case LogicalTypeId::TINYINT:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<int8_t>(input_format);
-            increment = sizeof(int8_t);
-            break;
-        case LogicalTypeId::USMALLINT:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<uint16_t>(input_format);
-            increment = sizeof(uint16_t);
-            break;
-        case LogicalTypeId::SMALLINT:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<int16_t>(input_format);
-            increment = sizeof(int16_t);
-            break;
-        case LogicalTypeId::UINTEGER:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<uint32_t>(input_format);
-            increment = sizeof(uint32_t);
-            break;
-        case LogicalTypeId::INTEGER:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<int32_t>(input_format);
-            increment = sizeof(int32_t);
-            break;
-        case LogicalTypeId::UBIGINT:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<uint64_t>(input_format);
-            increment = sizeof(uint64_t);
-            break;
-        case LogicalTypeId::BIGINT:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<int64_t>(input_format);
-            increment = sizeof(int64_t);
-            break;
-        case LogicalTypeId::UHUGEINT:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<uhugeint_t>(input_format);
-            increment = sizeof(uhugeint_t);
-            break;
-        case LogicalTypeId::HUGEINT:
-            data_ptr = (void *)UnifiedVectorFormat::GetData<hugeint_t>(input_format);
-            increment = sizeof(hugeint_t);
-            break;
-        default:
-            throw NotImplementedException("hilbert_decode()/morton_decode() only supports integer input types");
-        }
+  // Get typed pointers and metadata for input and output
+  DecodeInputDataInfo input_info = getDecodeInputDataInfo(left, left_format);
+  DecodeOutputDataInfo output_info =
+      getDecodeOutputDataInfo(result, output_child_type);
 
-        return DecodeInputDataInfo(data_ptr, increment);
-    }
+  // Process each row
+  decodeRows(args, left_format, bind_info, input_info, output_info,
+             output_number_of_elements, result);
 
-    // Helper function to get output data pointer, increment size, and bit width
-    inline DecodeOutputDataInfo getDecodeOutputDataInfo(Vector &result, const LogicalType &output_child_type)
-    {
-        auto &result_data_children = ArrayVector::GetChildMutable(result);
-        void *data_ptr = NULL;
-        size_t increment = 0;
-        uint8_t bit_width = 0;
+  // Optimize for single-element case
+  if (args.size() == 1) {
+    result.SetVectorType(VectorType::CONSTANT_VECTOR);
+  }
+}
 
-        switch (output_child_type.id())
-        {
-        case LogicalTypeId::UTINYINT:
-            data_ptr = FlatVector::GetDataMutable<uint8_t>(result_data_children);
-            increment = sizeof(uint8_t);
-            bit_width = 8;
-            break;
-        case LogicalTypeId::TINYINT:
-            data_ptr = FlatVector::GetDataMutable<int8_t>(result_data_children);
-            increment = sizeof(int8_t);
-            bit_width = 8;
-            break;
-        case LogicalTypeId::USMALLINT:
-            data_ptr = FlatVector::GetDataMutable<uint16_t>(result_data_children);
-            increment = sizeof(uint16_t);
-            bit_width = 16;
-            break;
-        case LogicalTypeId::SMALLINT:
-            data_ptr = FlatVector::GetDataMutable<int16_t>(result_data_children);
-            increment = sizeof(int16_t);
-            bit_width = 16;
-            break;
-        case LogicalTypeId::UINTEGER:
-            data_ptr = FlatVector::GetDataMutable<uint32_t>(result_data_children);
-            increment = sizeof(uint32_t);
-            bit_width = 32;
-            break;
-        case LogicalTypeId::INTEGER:
-            data_ptr = FlatVector::GetDataMutable<int32_t>(result_data_children);
-            increment = sizeof(int32_t);
-            bit_width = 32;
-            break;
-        case LogicalTypeId::FLOAT:
-            data_ptr = FlatVector::GetDataMutable<float>(result_data_children);
-            increment = sizeof(float);
-            bit_width = 32;
-            break;
-        case LogicalTypeId::UBIGINT:
-            data_ptr = FlatVector::GetDataMutable<uint64_t>(result_data_children);
-            increment = sizeof(uint64_t);
-            bit_width = 64;
-            break;
-        case LogicalTypeId::BIGINT:
-            data_ptr = FlatVector::GetDataMutable<int64_t>(result_data_children);
-            increment = sizeof(int64_t);
-            bit_width = 64;
-            break;
-        case LogicalTypeId::DOUBLE:
-            data_ptr = FlatVector::GetDataMutable<double>(result_data_children); // Fixed: was int64_t
-            increment = sizeof(double);
-            bit_width = 64;
-            break;
-        case LogicalTypeId::UHUGEINT:
-            data_ptr = FlatVector::GetDataMutable<uhugeint_t>(result_data_children);
-            increment = sizeof(uhugeint_t);
-            bit_width = 128;
-            break;
-        case LogicalTypeId::HUGEINT:
-            data_ptr = FlatVector::GetDataMutable<hugeint_t>(result_data_children);
-            increment = sizeof(hugeint_t);
-            bit_width = 128;
-            break;
-        default:
-            throw NotImplementedException("hilbert_decode()/morton_decode() only supports specified output types");
-        }
+// This is the "bind" function that is called for encoding an array of values.
+//
+// It validates the element type and array length and picks the narrowest
+// unsigned key type that can hold every bit of every coordinate.
+static unique_ptr<FunctionData>
+lindelEncodeArrayBind(BindScalarFunctionInput &input) {
+  auto &bound_function = input.GetBoundFunction();
+  auto &arguments = input.GetArguments();
+  unique_ptr<lindelEncodingBindData> bind_data =
+      make_uniq<lindelEncodingBindData>(0);
+  if (bound_function.GetName() == "hilbert_encode") {
+    bind_data->encoding_type = 0;
+  } else if (bound_function.GetName() == "morton_encode") {
+    bind_data->encoding_type = 1;
+  } else {
+    throw NotImplementedException("Unknown function name in lindelEncodeBind");
+  }
+  const string function_name =
+      bind_data->encoding_type == 0 ? "hilbert_encode" : "morton_encode";
 
-        return DecodeOutputDataInfo(data_ptr, increment, bit_width);
-    }
+  auto &left_type = arguments[0]->GetReturnType();
+  auto input_number_of_elements = ArrayType::GetSize(left_type);
+  auto input_child_type = ArrayType::GetChildType(left_type);
 
-    // Helper function to process all rows
-    inline void decodeRows(const DataChunk &args, const UnifiedVectorFormat &left_format,
-                           const lindelEncodingBindData &bind_info, const DecodeInputDataInfo &input_info,
-                           const DecodeOutputDataInfo &output_info, idx_t output_number_of_elements, Vector &result)
-    {
-        for (idx_t i = 0; i < args.size(); i++)
-        {
-            auto left_idx = left_format.sel->get_index(i);
+  EncodeElementInfo info;
+  if (!GetEncodeElementInfo(input_child_type, info)) {
+    throw InvalidInputException(
+        "%s() only supports arrays of %s values, not %s", function_name,
+        SUPPORTED_ELEMENT_TYPES, input_child_type.ToString());
+  }
 
-            // If the input value is NULL then the output value should be NULL.
-            if (!left_format.validity.RowIsValid(left_idx))
-            {
-                FlatVector::SetNull(result, i, true);
-                continue;
-            }
+  const idx_t max_elements = 128 / info.bit_width;
+  if (input_number_of_elements < 1 || input_number_of_elements > max_elements) {
+    throw InvalidInputException(
+        "%s() only supports arrays of length 1-%llu for %s, got %llu",
+        function_name, max_elements, input_child_type.ToString(),
+        input_number_of_elements);
+  }
 
-            // Calculate memory locations for this row
-            auto result_offset = i * output_number_of_elements;
-            void *output_location = (char *)output_info.data_ptr + result_offset * output_info.increment;
-            void *source_location = (char *)input_info.data_ptr + left_idx * input_info.increment;
+  bound_function.SetReturnType(
+      KeyTypeForBits(info.bit_width * input_number_of_elements));
+  return bind_data;
+}
 
-            // Perform the actual decoding
-            perform_decode(bind_info.encoding_type, output_info.bit_width, source_location,
-                           output_location, output_number_of_elements);
-        }
-    }
+template <class U> using LindelEncoder = bool (*)(const U *, size_t, void *);
 
-    // This function performs the actual decoding of values as a DuckDB scalar function.
-    //
-    inline void lindelDecodeArrayFun(DataChunk &args, ExpressionState &state, Vector &result)
-    {
-        // This is the number of elements in the output array, not the number of rows being processed.
-        auto output_number_of_elements = ArrayType::GetSize(result.GetType());
+// Encode every row of args, where each argument is one U-sized coordinate
+// column, into KEY-typed keys. A NULL in any argument gives a NULL key.
+template <class U, class KEY>
+static void EncodeColumnRows(DataChunk &args, Vector &result,
+                             LindelEncoder<U> encoder, OrderTransform transform,
+                             const string &function_name) {
+  const idx_t number_of_elements = args.ColumnCount();
+  D_ASSERT(number_of_elements <= 16);
 
-        // The type of the elements in the output array this will either be an integer type or a float type.
-        auto output_child_type = ArrayType::GetChildType(result.GetType());
+  UnifiedVectorFormat formats[16];
+  const U *columns[16];
+  for (idx_t c = 0; c < number_of_elements; c++) {
+    args.data[c].ToUnifiedFormat(formats[c]);
+    // Dates, timestamps, decimals and enums are read through their physical
+    // integer storage.
+    columns[c] = UnifiedVectorFormat::GetDataUnsafe<U>(formats[c]);
+  }
 
-        // Get a reference to the bind data that was already created that will determine the type
-        // of encoding to use.
-        auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-        auto &bind_info = func_expr.BindInfo()->Cast<lindelEncodingBindData>();
+  auto result_data = FlatVector::GetDataMutable<KEY>(result);
+  U ordered[16];
 
-        // Reference the source data.
-        auto &left = args.data[0];
-
-        // Standardize the vectors to a unified format, so it can be iterated.
-        UnifiedVectorFormat left_format;
-        left.ToUnifiedFormat(left_format);
-
-        // Get typed pointers and metadata for input and output
-        DecodeInputDataInfo input_info = getDecodeInputDataInfo(left, left_format);
-        DecodeOutputDataInfo output_info = getDecodeOutputDataInfo(result, output_child_type);
-
-        // Process each row
-        decodeRows(args, left_format, bind_info, input_info, output_info,
-                   output_number_of_elements, result);
-
-        // Optimize for single-element case
-        if (args.size() == 1)
-        {
-            result.SetVectorType(VectorType::CONSTANT_VECTOR);
-        }
-    }
-
-    // This is the "bind" function that is called for encoding an array of values.
-    //
-    // It doesn't have to do anything with the return type right now but it may in the future.
-    static unique_ptr<FunctionData> lindelEncodeArrayBind(BindScalarFunctionInput &input)
-    {
-        auto &bound_function = input.GetBoundFunction();
-        auto &arguments = input.GetArguments();
-        unique_ptr<lindelEncodingBindData> bind_data = make_uniq<lindelEncodingBindData>(0);
-        if (bound_function.GetName() == "hilbert_encode")
-        {
-            bind_data->encoding_type = 0;
-        }
-        else if (bound_function.GetName() == "morton_encode")
-        {
-            bind_data->encoding_type = 1;
-        }
-        else
-        {
-            throw NotImplementedException("Unknown function name in lindelEncodeBind");
-        }
-
-        // Now deal with validating the input type
-        auto &left_type = arguments[0]->GetReturnType();
-
-        // This is the number of elements in the output array, not the number of rows being procssed.
-        auto input_number_of_elements = ArrayType::GetSize(left_type);
-
-        // The type of the elements in the output array this will either be an integer type or a float type.
-        auto input_child_type = ArrayType::GetChildType(left_type);
-
-        switch (input_child_type.id())
-        {
-        case LogicalTypeId::DOUBLE:
-        {
-            switch (input_number_of_elements)
-            {
-            case 1:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
-                break;
-            case 2:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
-                break;
-            default:
-                throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths of 1 or 2 for DOUBLE.");
-            }
-        }
+  for (idx_t i = 0; i < args.size(); i++) {
+    bool is_null = false;
+    for (idx_t c = 0; c < number_of_elements; c++) {
+      auto idx = formats[c].sel->get_index(i);
+      if (!formats[c].validity.RowIsValid(idx)) {
+        is_null = true;
         break;
-        case LogicalTypeId::FLOAT:
-        {
-            switch (input_number_of_elements)
-            {
-            case 1:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UINTEGER));
-                break;
-            case 2:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
-                break;
-            case 3:
-            case 4:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
-                break;
-            default:
-                throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-4 for FLOAT.");
-            }
-        }
-        break;
-        case LogicalTypeId::UBIGINT:
-        case LogicalTypeId::BIGINT:
-        {
-            switch (input_number_of_elements)
-            {
-            case 1:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
-                break;
-            case 2:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
-                break;
-            default:
-                throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths of 1 or 2 for BIGINT/UBIGINT.");
-            }
-        }
-        break;
-        case LogicalTypeId::UINTEGER:
-        case LogicalTypeId::INTEGER:
-        {
-            switch (input_number_of_elements)
-            {
-            case 1:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UINTEGER));
-                break;
-            case 2:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
-                break;
-            case 3:
-            case 4:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
-                break;
-            default:
-                throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-4 for UINTEGER/INTEGER.");
-            }
-        }
-        break;
-        case LogicalTypeId::USMALLINT:
-        case LogicalTypeId::SMALLINT:
-        {
-            switch (input_number_of_elements)
-            {
-            case 1: // 16
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::USMALLINT));
-                break;
-            case 2: // 32
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UINTEGER));
-                break;
-            case 3:
-            case 4:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
-                break;
-            case 5:
-            case 6:
-            case 7:
-            case 8:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
-                break;
-            default:
-                throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-8 for USMALLINT/SMALLINT.");
-            }
-        }
-        break;
-        case LogicalTypeId::UTINYINT:
-        case LogicalTypeId::TINYINT:
-        {
-            switch (input_number_of_elements)
-            {
-            case 1:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UTINYINT));
-                break;
-            case 2:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::USMALLINT));
-                break;
-            case 3:
-            case 4:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UINTEGER));
-                break;
-            case 5:
-            case 6:
-            case 7:
-            case 8:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UBIGINT));
-                break;
-            case 9:
-            case 10:
-            case 11:
-            case 12:
-            case 13:
-            case 14:
-            case 15:
-            case 16:
-                bound_function.SetReturnType(LogicalType(LogicalTypeId::UHUGEINT));
-                break;
-            default:
-                throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-16 for UTINYINT/TINYINT.");
-            }
-        }
-        break;
-        default:
-            throw InvalidInputException("hilbert_encode()/morton_encode() only supports arrays of types DOUBLE, FLOAT, UBIGINT, BIGINT, UINTEGER, INTEGER, USMALLINT, SMALLINT, UTINYINT, TINYINT");
-        }
+      }
+      ordered[c] = ToOrderedBits<U>(columns[c][idx], transform);
+    }
+    if (is_null) {
+      FlatVector::SetNull(result, i, true);
+      continue;
+    }
+    if (!encoder(ordered, number_of_elements, result_data + i)) {
+      throw InternalException("%s: encoder rejected %llu coordinates",
+                              function_name, number_of_elements);
+    }
+  }
 
-        return bind_data;
+  if (args.size() == 1) {
+    result.SetVectorType(VectorType::CONSTANT_VECTOR);
+  }
+}
+
+// Encode every row of args.data[0] (an array of U-sized coordinates) into
+// KEY-typed keys.
+template <class U, class KEY>
+static void EncodeRows(DataChunk &args, Vector &result,
+                       LindelEncoder<U> encoder, OrderTransform transform,
+                       const string &function_name) {
+  auto &input = args.data[0];
+  const idx_t number_of_elements = ArrayType::GetSize(input.GetType());
+  D_ASSERT(number_of_elements <= 16);
+
+  auto &child = ArrayVector::GetChild(input);
+  auto &child_validity = FlatVector::Validity(child);
+  auto child_data = reinterpret_cast<const U *>(FlatVector::GetData(child));
+
+  UnifiedVectorFormat input_format;
+  input.ToUnifiedFormat(input_format);
+
+  auto result_data = FlatVector::GetDataMutable<KEY>(result);
+  U ordered[16];
+
+  for (idx_t i = 0; i < args.size(); i++) {
+    auto input_idx = input_format.sel->get_index(i);
+    if (!input_format.validity.RowIsValid(input_idx)) {
+      FlatVector::SetNull(result, i, true);
+      continue;
     }
 
-    // Perform encoding for an array of values.
-    inline void lindelEncodeArrayFunc(DataChunk &args, ExpressionState &state, Vector &result)
-    {
-        // Get a reference to the bind data.
-        auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-        auto &bind_info = func_expr.BindInfo()->Cast<lindelEncodingBindData>();
-
-        // This is the size of the array
-        auto array_number_of_elements = ArrayType::GetSize(args.data[0].GetType());
-        auto child_type = ArrayType::GetChildType(args.data[0].GetType());
-
-        // Get a pointer to the input data.
-        auto &left = args.data[0];
-        auto &left_child = ArrayVector::GetChild(left);
-        auto &left_child_validity = FlatVector::Validity(left_child);
-        UnifiedVectorFormat left_format;
-
-        left.ToUnifiedFormat(left_format);
-
-        for (idx_t i = 0; i < args.size(); i++)
-        {
-            auto left_idx = left_format.sel->get_index(i);
-            if (!left_format.validity.RowIsValid(left_idx))
-            {
-                FlatVector::SetNull(result, i, true);
-                continue;
-            }
-
-            auto left_offset = left_idx * array_number_of_elements;
-            if (!left_child_validity.CheckAllValid(left_offset + array_number_of_elements, left_offset))
-            {
-                throw InvalidInputException(StringUtil::Format("%s: array can not contain NULL values", "hilbert_encode"));
-            }
-
-            switch (child_type.id())
-            {
-            case LogicalTypeId::DOUBLE:
-            {
-                auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u64_var : morton_encode_u64_var;
-                switch (array_number_of_elements)
-                {
-                case 1:
-                {
-                    auto left_data_double = FlatVector::GetData<double_t>(left_child);
-                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
-
-                    encoder((uint64_t *)(left_data_double + left_offset), array_number_of_elements, result_data_u64 + i);
-                    break;
-                }
-                case 2:
-                {
-                    auto left_data_double = FlatVector::GetData<double_t>(left_child);
-                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
-
-                    encoder((uint64_t *)(left_data_double + left_offset), array_number_of_elements, result_data_u128 + i);
-                    break;
-                }
-                default:
-                    throw NotImplementedException("hilbert_encode()/morton_encode() only supports arrays of lengths of 1 or 2 for DOUBLE.");
-                }
-            }
-            break;
-            case LogicalTypeId::FLOAT:
-            {
-                // The number of elements in the array dictates the output type.
-                auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u32_var : morton_encode_u32_var;
-                switch (array_number_of_elements)
-                {
-                case 1:
-                {
-                    auto left_data_float = FlatVector::GetData<float_t>(left_child);
-                    auto result_data_u32 = FlatVector::GetDataMutable<uint32_t>(result);
-
-                    encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u32 + i);
-                    break;
-                }
-                case 2:
-                {
-                    auto left_data_float = FlatVector::GetData<float_t>(left_child);
-                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
-
-                    encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u64 + i);
-                    break;
-                }
-                case 3:
-                case 4:
-                {
-                    auto left_data_float = FlatVector::GetData<float_t>(left_child);
-                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
-
-                    encoder((uint32_t *)(left_data_float + left_offset), array_number_of_elements, result_data_u128 + i);
-                    break;
-                }
-                default:
-                    throw NotImplementedException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-4 for FLOAT.");
-                }
-            }
-            break;
-            case LogicalTypeId::UBIGINT:
-            case LogicalTypeId::BIGINT:
-            {
-                auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u64_var : morton_encode_u64_var;
-                auto left_data_64 = (uint64_t *)FlatVector::GetData(left_child);
-                switch (array_number_of_elements)
-                {
-                case 1:
-                {
-                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
-                    encoder(left_data_64 + left_offset, array_number_of_elements, result_data_u64 + i);
-                    break;
-                }
-                case 2:
-                {
-                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
-                    encoder(left_data_64 + left_offset, array_number_of_elements, result_data_u128 + i);
-                    break;
-                }
-                default:
-                    throw NotImplementedException("hilbert_encode()/morton_encode() only supports arrays of lengths of 1 or 2 for BIGINT/UBIGINT.");
-                }
-            }
-            break;
-
-            case LogicalTypeId::UINTEGER:
-            case LogicalTypeId::INTEGER:
-            {
-                auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u32_var : morton_encode_u32_var;
-                auto left_data_32 = (uint32_t *)FlatVector::GetData(left_child);
-                // The number of elements in the array dictates the output type.
-                switch (array_number_of_elements)
-                {
-                case 1:
-                {
-                    auto result_data_u32 = FlatVector::GetDataMutable<uint32_t>(result);
-                    encoder(left_data_32 + left_offset, array_number_of_elements, result_data_u32 + i);
-                    break;
-                }
-                case 2:
-                {
-                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
-                    encoder(left_data_32 + left_offset, array_number_of_elements, result_data_u64 + i);
-                    break;
-                }
-                case 3:
-                case 4:
-                {
-                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
-                    encoder(left_data_32 + left_offset, array_number_of_elements, result_data_u128 + i);
-                    break;
-                }
-                default:
-                    throw NotImplementedException("hilbert_encode()/morton_encode() only supports arrays of lengths 1-4 for UINTEGER/INTEGER.");
-                }
-            }
-            break;
-            case LogicalTypeId::SMALLINT:
-            case LogicalTypeId::USMALLINT:
-            {
-                // The number of elements in the array dictates the output type.
-                auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u16_var : morton_encode_u16_var;
-                auto left_data_16 = (uint16_t *)FlatVector::GetData(left_child);
-                switch (array_number_of_elements)
-                {
-                case 1:
-                {
-                    auto result_data_u16 = FlatVector::GetDataMutable<uint16_t>(result);
-                    encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u16 + i);
-                    break;
-                }
-                case 2:
-                {
-                    auto result_data_u32 = FlatVector::GetDataMutable<uint32_t>(result);
-                    encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u32 + i);
-                    break;
-                }
-                case 3:
-                case 4:
-                {
-                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
-                    encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u64 + i);
-                    break;
-                }
-                case 5:
-                case 6:
-                case 7:
-                case 8:
-                {
-                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
-                    encoder(left_data_16 + left_offset, array_number_of_elements, result_data_u128 + i);
-                    break;
-                }
-                default:
-                    throw NotImplementedException("hilbert_encode()/morton_encode() only supports arrays of length 1-8 for SMALLINT/USMALLINT.");
-                }
-            }
-            break;
-            case LogicalTypeId::TINYINT:
-            case LogicalTypeId::UTINYINT:
-            {
-                // The number of elements in the array dictates the output type.
-                auto encoder = bind_info.encoding_type == 0 ? hilbert_encode_u8_var : morton_encode_u8_var;
-                auto left_data_8 = (uint8_t *)FlatVector::GetData(left_child);
-                switch (array_number_of_elements)
-                {
-                case 1:
-                {
-                    auto result_data_u8 = FlatVector::GetDataMutable<uint8_t>(result);
-                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u8 + i);
-                    break;
-                }
-                case 2:
-                {
-                    auto result_data_u16 = FlatVector::GetDataMutable<uint16_t>(result);
-                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u16 + i);
-                    break;
-                }
-                case 3:
-                case 4:
-                {
-                    auto result_data_u32 = FlatVector::GetDataMutable<uint32_t>(result);
-                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u32 + i);
-                    break;
-                }
-                case 5:
-                case 6:
-                case 7:
-                case 8:
-                {
-                    auto result_data_u64 = FlatVector::GetDataMutable<uint64_t>(result);
-                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u64 + i);
-                    break;
-                }
-                case 9:
-                case 10:
-                case 11:
-                case 12:
-                case 13:
-                case 14:
-                case 15:
-                case 16:
-                {
-                    auto result_data_u128 = FlatVector::GetDataMutable<uhugeint_t>(result);
-                    encoder(left_data_8 + left_offset, array_number_of_elements, result_data_u128 + i);
-                    break;
-                }
-                default:
-                    throw NotImplementedException("hilbert_encode()/morton_encode() only supports arrays of length 1-16 for UTINYINT/TINYINT.");
-                }
-            }
-            break;
-            default:
-                throw NotImplementedException("hilbert_encode()/morton_encode() only supports arrays of FLOAT, DOUBLE, BIGINT, UBIGINT, INTEGER, UINTEGER, SMALLINT, USMALLINT, TINYINT, UTINYINT types");
-            }
-        }
-
-        if (args.size() == 1)
-        {
-            result.SetVectorType(VectorType::CONSTANT_VECTOR);
-        }
+    auto offset = input_idx * number_of_elements;
+    if (!child_validity.CheckAllValid(offset + number_of_elements, offset)) {
+      throw InvalidInputException("%s: array can not contain NULL values",
+                                  function_name);
     }
 
-    // Extension initalization.
-    static void LoadInternal(ExtensionLoader &loader)
-    {
-        ScalarFunctionSet hilbert_encode("hilbert_encode");
-        ScalarFunctionSet morton_encode("morton_encode");
-
-        using SF = ScalarFunction; // Alias for ScalarFunction
-
-        hilbert_encode.AddFunction(SF({Positional("values", LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()))}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
-        morton_encode.AddFunction(SF({Positional("values", LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()))}, LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
-
-        // Encoding throws on arrays that contain NULL values.
-        hilbert_encode.SetFallible();
-        morton_encode.SetFallible();
-
-        // Register hilbert_encode with documentation
-        CreateScalarFunctionInfo hilbert_encode_info(hilbert_encode);
-        FunctionDescription hilbert_encode_desc;
-        hilbert_encode_desc.description = "Encodes an array of integers or floats into a single unsigned integer using Hilbert curve mapping. "
-                                          "Hilbert curves preserve locality better than Morton encoding, making them ideal for spatial indexing.";
-        hilbert_encode_desc.examples = {"hilbert_encode([1, 2, 3]::INTEGER[3])"};
-        hilbert_encode_desc.categories = {"spatial"};
-        hilbert_encode_desc.parameter_names = {"values"};
-        hilbert_encode_info.descriptions.push_back(hilbert_encode_desc);
-        loader.RegisterFunction(hilbert_encode_info);
-
-        // Register morton_encode with documentation
-        CreateScalarFunctionInfo morton_encode_info(morton_encode);
-        FunctionDescription morton_encode_desc;
-        morton_encode_desc.description = "Encodes an array of integers or floats into a single unsigned integer using Morton (Z-order) curve mapping. "
-                                         "Morton encoding interleaves bits and is computationally simpler than Hilbert encoding.";
-        morton_encode_desc.examples = {"morton_encode([1, 2, 3]::INTEGER[3])"};
-        morton_encode_desc.categories = {"spatial"};
-        morton_encode_desc.parameter_names = {"values"};
-        morton_encode_info.descriptions.push_back(morton_encode_desc);
-        loader.RegisterFunction(morton_encode_info);
-
-        ScalarFunctionSet hilbert_decode = ScalarFunctionSet("hilbert_decode");
-        ScalarFunctionSet morton_decode = ScalarFunctionSet("morton_decode");
-
-        std::vector<LogicalType> types_that_can_be_decoded = {
-            LogicalType(LogicalTypeId::UTINYINT),
-            LogicalType(LogicalTypeId::USMALLINT),
-            LogicalType(LogicalTypeId::UINTEGER),
-            LogicalType(LogicalTypeId::UBIGINT),
-            LogicalType(LogicalTypeId::UHUGEINT)};
-
-        for (const auto &decodable_type : types_that_can_be_decoded)
-        {
-            hilbert_decode.AddFunction(
-                ScalarFunction({Positional("encoded_value", decodable_type), Positional("num_elements", LogicalType(LogicalTypeId::UTINYINT)), Positional("return_float", LogicalType(LogicalTypeId::BOOLEAN)), Positional("return_unsigned", LogicalType(LogicalTypeId::BOOLEAN))}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
-                               lindelDecodeArrayFun,
-                               lindelDecodeToArrayBind));
-
-            morton_decode.AddFunction(
-                ScalarFunction({Positional("encoded_value", decodable_type), Positional("num_elements", LogicalType(LogicalTypeId::UTINYINT)), Positional("return_float", LogicalType(LogicalTypeId::BOOLEAN)), Positional("return_unsigned", LogicalType(LogicalTypeId::BOOLEAN))}, LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
-                               lindelDecodeArrayFun,
-                               lindelDecodeToArrayBind));
-        }
-
-        // Decoding throws on unsupported input/output types.
-        hilbert_decode.SetFallible();
-        morton_decode.SetFallible();
-
-        // Register hilbert_decode with documentation
-        CreateScalarFunctionInfo hilbert_decode_info(hilbert_decode);
-        FunctionDescription hilbert_decode_desc;
-        hilbert_decode_desc.description = "Decodes a Hilbert-encoded unsigned integer back into an array of values. "
-                                          "The number of output elements and their type are determined by the parameters. "
-                                          "Keep the encoded key unsigned; return_unsigned selects signed or unsigned integer coordinates.";
-        hilbert_decode_desc.examples = {"hilbert_decode(123::UBIGINT, 2, false, true)",
-                                        "hilbert_decode(hilbert_encode([-1]::INTEGER[1]), 1, false, false)"};
-        hilbert_decode_desc.categories = {"spatial"};
-        hilbert_decode_desc.parameter_names = {"encoded_value", "num_elements", "return_float", "return_unsigned"};
-        hilbert_decode_info.descriptions.push_back(hilbert_decode_desc);
-        loader.RegisterFunction(hilbert_decode_info);
-
-        // Register morton_decode with documentation
-        CreateScalarFunctionInfo morton_decode_info(morton_decode);
-        FunctionDescription morton_decode_desc;
-        morton_decode_desc.description = "Decodes a Morton (Z-order) encoded unsigned integer back into an array of values. "
-                                         "The number of output elements and their type are determined by the parameters. "
-                                          "Keep the encoded key unsigned; return_unsigned selects signed or unsigned integer coordinates.";
-        morton_decode_desc.examples = {"morton_decode(123::UBIGINT, 2, false, true)",
-                                       "morton_decode(morton_encode([-1]::INTEGER[1]), 1, false, false)"};
-        morton_decode_desc.categories = {"spatial"};
-        morton_decode_desc.parameter_names = {"encoded_value", "num_elements", "return_float", "return_unsigned"};
-        morton_decode_info.descriptions.push_back(morton_decode_desc);
-        loader.RegisterFunction(morton_decode_info);
-
-        QueryFarmSendTelemetry(loader, "lindel", "2026102101");
+    for (idx_t j = 0; j < number_of_elements; j++) {
+      ordered[j] = ToOrderedBits<U>(child_data[offset + j], transform);
     }
 
-    void LindelExtension::Load(ExtensionLoader &loader)
-    {
-        LoadInternal(loader);
+    if (!encoder(ordered, number_of_elements, result_data + i)) {
+      throw InternalException("%s: encoder rejected an array of length %llu",
+                              function_name, number_of_elements);
     }
-    std::string LindelExtension::Name()
-    {
-        return "lindel";
-    }
+  }
 
-    std::string LindelExtension::Version() const
-    {
-        return "2026102101";
+  if (args.size() == 1) {
+    result.SetVectorType(VectorType::CONSTANT_VECTOR);
+  }
+}
+
+template <class U, class KEY>
+static void EncodeAny(bool columns, DataChunk &args, Vector &result,
+                      LindelEncoder<U> encoder, OrderTransform transform,
+                      const string &function_name) {
+  if (columns) {
+    EncodeColumnRows<U, KEY>(args, result, encoder, transform, function_name);
+  } else {
+    EncodeRows<U, KEY>(args, result, encoder, transform, function_name);
+  }
+}
+
+// Pick the key type the bind function chose and run the encoder.
+template <class U>
+static void EncodeWithKeyType(bool columns, DataChunk &args, Vector &result,
+                              LindelEncoder<U> encoder,
+                              OrderTransform transform,
+                              const string &function_name) {
+  switch (result.GetType().id()) {
+  case LogicalTypeId::UTINYINT:
+    EncodeAny<U, uint8_t>(columns, args, result, encoder, transform,
+                          function_name);
+    break;
+  case LogicalTypeId::USMALLINT:
+    EncodeAny<U, uint16_t>(columns, args, result, encoder, transform,
+                           function_name);
+    break;
+  case LogicalTypeId::UINTEGER:
+    EncodeAny<U, uint32_t>(columns, args, result, encoder, transform,
+                           function_name);
+    break;
+  case LogicalTypeId::UBIGINT:
+    EncodeAny<U, uint64_t>(columns, args, result, encoder, transform,
+                           function_name);
+    break;
+  case LogicalTypeId::UHUGEINT:
+    EncodeAny<U, uhugeint_t>(columns, args, result, encoder, transform,
+                             function_name);
+    break;
+  default:
+    throw InternalException("%s: unexpected key type %s", function_name,
+                            result.GetType().ToString());
+  }
+}
+
+// Perform encoding for an array of values.
+//
+// The element type, array length and key type are fixed for the whole chunk, so
+// all dispatching happens once here rather than per row.
+inline void lindelEncodeArrayFunc(DataChunk &args, ExpressionState &state,
+                                  Vector &result) {
+  auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+  auto &bind_info = func_expr.BindInfo()->Cast<lindelEncodingBindData>();
+  const bool hilbert = bind_info.encoding_type == 0;
+  const string function_name = hilbert ? "hilbert_encode" : "morton_encode";
+
+  auto child_type = bind_info.columns
+                        ? args.data[0].GetType()
+                        : ArrayType::GetChildType(args.data[0].GetType());
+  EncodeElementInfo info;
+  if (!GetEncodeElementInfo(child_type, info)) {
+    throw InternalException("%s: unexpected element type %s", function_name,
+                            child_type.ToString());
+  }
+
+  switch (info.bit_width) {
+  case 8:
+    EncodeWithKeyType<uint8_t>(bind_info.columns, args, result,
+                               hilbert ? hilbert_encode_u8_var
+                                       : morton_encode_u8_var,
+                               info.transform, function_name);
+    break;
+  case 16:
+    EncodeWithKeyType<uint16_t>(bind_info.columns, args, result,
+                                hilbert ? hilbert_encode_u16_var
+                                        : morton_encode_u16_var,
+                                info.transform, function_name);
+    break;
+  case 32:
+    EncodeWithKeyType<uint32_t>(bind_info.columns, args, result,
+                                hilbert ? hilbert_encode_u32_var
+                                        : morton_encode_u32_var,
+                                info.transform, function_name);
+    break;
+  case 64:
+    EncodeWithKeyType<uint64_t>(bind_info.columns, args, result,
+                                hilbert ? hilbert_encode_u64_var
+                                        : morton_encode_u64_var,
+                                info.transform, function_name);
+    break;
+  default:
+    throw InternalException("%s: unexpected element width", function_name);
+  }
+}
+
+// hilbert_encode(x, y, ...) / morton_encode(x, y, ...): coordinates as separate
+// arguments, coerced to their common type.
+static void
+lindelEncodeColumnsResolveTypes(ResolveScalarFunctionTypesInput &input) {
+  auto &bound_function = input.GetBoundFunction();
+  const string function_name = bound_function.GetName() == "hilbert_encode"
+                                   ? "hilbert_encode"
+                                   : "morton_encode";
+  auto &context = input.GetClientContext();
+
+  const idx_t count = input.GetArgumentCount();
+  LogicalType common = input.GetArgumentType(0);
+  for (idx_t i = 0; i < count; i++) {
+    auto &type = input.GetArgumentType(i);
+    if (type.id() == LogicalTypeId::UNKNOWN) {
+      bound_function.SetReturnType(LogicalType::UNKNOWN);
+      return;
     }
+    if (i > 0) {
+      common = LogicalType::MaxLogicalType(context, common, type);
+    }
+  }
+  common = LogicalType::NormalizeType(common);
+
+  EncodeElementInfo info;
+  if (!GetEncodeElementInfo(common, info)) {
+    throw InvalidInputException("%s() only supports %s coordinates, not %s",
+                                function_name, SUPPORTED_ELEMENT_TYPES,
+                                common.ToString());
+  }
+  const idx_t max_elements = 128 / info.bit_width;
+  if (count > max_elements) {
+    throw InvalidInputException(
+        "%s() supports at most %llu %s coordinates, got %llu", function_name,
+        max_elements, common.ToString(), count);
+  }
+  auto &arguments = bound_function.GetArguments();
+  for (idx_t i = 0; i < arguments.size(); i++) {
+    arguments[i] = common;
+  }
+  bound_function.SetReturnType(KeyTypeForBits(info.bit_width * count));
+}
+
+static unique_ptr<FunctionData>
+lindelEncodeColumnsBind(BindScalarFunctionInput &input) {
+  auto &bound_function = input.GetBoundFunction();
+  return make_uniq<lindelEncodingBindData>(
+      bound_function.GetName() == "hilbert_encode" ? 0 : 1, true);
+}
+
+static ScalarFunction EncodeColumnsFunction() {
+  ScalarFunction fn(
+      {Positional("x", LogicalType::ANY), Positional("y", LogicalType::ANY)},
+      LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeColumnsBind);
+  fn.GetSignature().AddArgs("values", LogicalType::ANY);
+  fn.SetResolveTypesCallback(lindelEncodeColumnsResolveTypes);
+  return fn;
+}
+
+// Extension initalization.
+static void LoadInternal(ExtensionLoader &loader) {
+  ScalarFunctionSet hilbert_encode("hilbert_encode");
+  ScalarFunctionSet morton_encode("morton_encode");
+
+  using SF = ScalarFunction; // Alias for ScalarFunction
+
+  hilbert_encode.AddFunction(
+      SF({Positional("values", LogicalType::ARRAY(LogicalType::ANY,
+                                                  optional_idx::Invalid()))},
+         LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
+  morton_encode.AddFunction(
+      SF({Positional("values", LogicalType::ARRAY(LogicalType::ANY,
+                                                  optional_idx::Invalid()))},
+         LogicalType::ANY, lindelEncodeArrayFunc, lindelEncodeArrayBind));
+
+  hilbert_encode.AddFunction(EncodeColumnsFunction());
+  morton_encode.AddFunction(EncodeColumnsFunction());
+
+  // Encoding throws on arrays that contain NULL values.
+  hilbert_encode.SetFallible();
+  morton_encode.SetFallible();
+
+  // Register hilbert_encode with documentation
+  CreateScalarFunctionInfo hilbert_encode_info(hilbert_encode);
+  FunctionDescription hilbert_encode_desc;
+  hilbert_encode_desc.description =
+      "Encodes coordinates - one fixed-size array, or two or more separate "
+      "arguments coerced to a common type - "
+      "into a single unsigned integer using Hilbert curve mapping. Accepts "
+      "integer, FLOAT, DOUBLE, BOOLEAN, DATE, TIME, "
+      "TIMESTAMP, DECIMAL (up to 18 digits) and ENUM coordinates; keys sort "
+      "like the coordinates in each dimension. "
+      "Hilbert curves preserve locality better than Morton encoding, making "
+      "them ideal for spatial indexing.";
+  hilbert_encode_desc.examples = {"hilbert_encode([1, 2, 3]::INTEGER[3])",
+                                  "hilbert_encode(x, y)",
+                                  "hilbert_encode(event_date, user_id)"};
+  hilbert_encode_desc.categories = {"spatial"};
+  hilbert_encode_desc.parameter_names = {"values"};
+  hilbert_encode_info.descriptions.push_back(hilbert_encode_desc);
+  loader.RegisterFunction(hilbert_encode_info);
+
+  // Register morton_encode with documentation
+  CreateScalarFunctionInfo morton_encode_info(morton_encode);
+  FunctionDescription morton_encode_desc;
+  morton_encode_desc.description =
+      "Encodes coordinates - one fixed-size array, or two or more separate "
+      "arguments coerced to a common type - "
+      "into a single unsigned integer using Morton (Z-order) curve mapping. "
+      "Accepts integer, FLOAT, DOUBLE, BOOLEAN, DATE, "
+      "TIME, TIMESTAMP, DECIMAL (up to 18 digits) and ENUM coordinates; keys "
+      "sort like the coordinates in each dimension. "
+      "Morton encoding interleaves bits and is computationally simpler than "
+      "Hilbert encoding.";
+  morton_encode_desc.examples = {"morton_encode([1, 2, 3]::INTEGER[3])",
+                                 "morton_encode(x, y)",
+                                 "morton_encode(event_date, user_id)"};
+  morton_encode_desc.categories = {"spatial"};
+  morton_encode_desc.parameter_names = {"values"};
+  morton_encode_info.descriptions.push_back(morton_encode_desc);
+  loader.RegisterFunction(morton_encode_info);
+
+  ScalarFunctionSet hilbert_decode = ScalarFunctionSet("hilbert_decode");
+  ScalarFunctionSet morton_decode = ScalarFunctionSet("morton_decode");
+
+  std::vector<LogicalType> types_that_can_be_decoded = {
+      LogicalType(LogicalTypeId::UTINYINT),
+      LogicalType(LogicalTypeId::USMALLINT),
+      LogicalType(LogicalTypeId::UINTEGER), LogicalType(LogicalTypeId::UBIGINT),
+      LogicalType(LogicalTypeId::UHUGEINT)};
+
+  for (const auto &decodable_type : types_that_can_be_decoded) {
+    hilbert_decode.AddFunction(ScalarFunction(
+        {Positional("encoded_value", decodable_type),
+         Positional("num_elements", LogicalType(LogicalTypeId::UTINYINT)),
+         Positional("return_float", LogicalType(LogicalTypeId::BOOLEAN)),
+         Positional("return_unsigned", LogicalType(LogicalTypeId::BOOLEAN))},
+        LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
+        lindelDecodeArrayFun, lindelDecodeToArrayBind));
+
+    morton_decode.AddFunction(ScalarFunction(
+        {Positional("encoded_value", decodable_type),
+         Positional("num_elements", LogicalType(LogicalTypeId::UTINYINT)),
+         Positional("return_float", LogicalType(LogicalTypeId::BOOLEAN)),
+         Positional("return_unsigned", LogicalType(LogicalTypeId::BOOLEAN))},
+        LogicalType::ARRAY(LogicalType::ANY, optional_idx::Invalid()),
+        lindelDecodeArrayFun, lindelDecodeToArrayBind));
+  }
+
+  AddTypedDecodeOverloads(hilbert_decode);
+  AddTypedDecodeOverloads(morton_decode);
+
+  // Decoding throws on unsupported input/output types.
+  hilbert_decode.SetFallible();
+  morton_decode.SetFallible();
+
+  // Register hilbert_decode with documentation
+  CreateScalarFunctionInfo hilbert_decode_info(hilbert_decode);
+  FunctionDescription hilbert_decode_desc;
+  hilbert_decode_desc.description =
+      "Decodes a Hilbert key back into coordinates. Preferred form: "
+      "hilbert_decode(key, 'TYPE[n]') with the "
+      "array type that was encoded (e.g. 'DOUBLE[2]', 'DATE[2]', "
+      "'INTEGER[3]'), or a scalar type for one dimension. "
+      "The original form hilbert_decode(key, num_elements, return_float, "
+      "return_unsigned) decodes integer and float "
+      "coordinates; return_unsigned must match the signedness of the encoded "
+      "values.";
+  hilbert_decode_desc.examples = {
+      "hilbert_decode(hilbert_encode([1.5, -2.0]::DOUBLE[2]), 'DOUBLE[2]')",
+      "hilbert_decode(hilbert_encode(DATE '2024-01-01', DATE '2024-12-31'), "
+      "'DATE[2]')",
+      "hilbert_decode(123::UBIGINT, 2, false, true)",
+      "hilbert_decode(hilbert_encode([-1]::INTEGER[1]), 1, false, false)"};
+  hilbert_decode_desc.categories = {"spatial"};
+  hilbert_decode_desc.parameter_names = {"encoded_value", "num_elements",
+                                         "return_float", "return_unsigned"};
+  hilbert_decode_info.descriptions.push_back(hilbert_decode_desc);
+  loader.RegisterFunction(hilbert_decode_info);
+
+  // Register morton_decode with documentation
+  CreateScalarFunctionInfo morton_decode_info(morton_decode);
+  FunctionDescription morton_decode_desc;
+  morton_decode_desc.description =
+      "Decodes a Morton (Z-order) key back into coordinates. Preferred form: "
+      "morton_decode(key, 'TYPE[n]') with the "
+      "array type that was encoded (e.g. 'DOUBLE[2]', 'DATE[2]', "
+      "'INTEGER[3]'), or a scalar type for one dimension. "
+      "The original form morton_decode(key, num_elements, return_float, "
+      "return_unsigned) decodes integer and float "
+      "coordinates; return_unsigned must match the signedness of the encoded "
+      "values.";
+  morton_decode_desc.examples = {
+      "morton_decode(morton_encode([1.5, -2.0]::DOUBLE[2]), 'DOUBLE[2]')",
+      "morton_decode(morton_encode(DATE '2024-01-01', DATE '2024-12-31'), "
+      "'DATE[2]')",
+      "morton_decode(123::UBIGINT, 2, false, true)",
+      "morton_decode(morton_encode([-1]::INTEGER[1]), 1, false, false)"};
+  morton_decode_desc.categories = {"spatial"};
+  morton_decode_desc.parameter_names = {"encoded_value", "num_elements",
+                                        "return_float", "return_unsigned"};
+  morton_decode_info.descriptions.push_back(morton_decode_desc);
+  loader.RegisterFunction(morton_decode_info);
+
+  RegisterBoundedFunctions(loader);
+  RegisterRangeFunctions(loader);
+
+  QueryFarmSendTelemetry(loader, "lindel", "2026110602");
+}
+
+void LindelExtension::Load(ExtensionLoader &loader) { LoadInternal(loader); }
+std::string LindelExtension::Name() { return "lindel"; }
+
+std::string LindelExtension::Version() const { return "2026110602"; }
 
 } // namespace duckdb
 
-extern "C"
-{
+extern "C" {
 
-    DUCKDB_CPP_EXTENSION_ENTRY(lindel, loader)
-    {
-        duckdb::LoadInternal(loader);
-    }
+DUCKDB_CPP_EXTENSION_ENTRY(lindel, loader) { duckdb::LoadInternal(loader); }
 }

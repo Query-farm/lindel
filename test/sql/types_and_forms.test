@@ -1,0 +1,138 @@
+# name: test/sql/types_and_forms.test
+# description: Separate-argument encoding, typed decoding, and date/time/decimal/boolean/enum coordinates
+# group: [sql]
+
+require lindel
+
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+
+foreach curve hilbert morton
+
+# Separate arguments encode exactly like the equivalent array.
+query II
+SELECT {curve}_encode(1::UTINYINT, 2::UTINYINT, 3::UTINYINT) = {curve}_encode([1, 2, 3]::UTINYINT[3]),
+       {curve}_encode(-4::INTEGER, 9::INTEGER) = {curve}_encode([-4, 9]::INTEGER[2]);
+----
+true	true
+
+# Arguments are coerced to their common type, which also decides the key type.
+query III
+SELECT typeof({curve}_encode(1::TINYINT, 2::TINYINT)), typeof({curve}_encode(1::TINYINT, 2::BIGINT)),
+       {curve}_encode(1.5::DOUBLE, 2::INTEGER) = {curve}_encode([1.5, 2.0]::DOUBLE[2]);
+----
+USMALLINT	UHUGEINT	true
+
+# A NULL argument gives a NULL key.
+query I
+SELECT {curve}_encode(1::INTEGER, NULL::INTEGER) IS NULL;
+----
+true
+
+# Typed decode returns the named type, for arrays and for a single scalar.
+query IIII
+SELECT {curve}_decode({curve}_encode([1.5, -2.0]::DOUBLE[2]), 'DOUBLE[2]'),
+       typeof({curve}_decode({curve}_encode([1.5, -2.0]::DOUBLE[2]), 'DOUBLE[2]')),
+       {curve}_decode({curve}_encode([-7]::INTEGER[1]), 'INTEGER'),
+       {curve}_decode(NULL::UBIGINT, 'INTEGER[2]') IS NULL;
+----
+[1.5, -2.0]	DOUBLE[2]	-7	true
+
+# Round trips across many values for each newly supported type, via both encode forms.
+query I
+WITH v AS (SELECT DATE '1970-01-01' + INTERVAL (i * 37 - 20000) DAY AS a, DATE '2000-02-29' - INTERVAL (i * 11) DAY AS b FROM range(500) t(i))
+SELECT bool_and({curve}_decode({curve}_encode(a::DATE, b::DATE), 'DATE[2]') = [a::DATE, b::DATE]) FROM v;
+----
+true
+
+query I
+WITH v AS (SELECT TIMESTAMP '1969-07-20 20:17:40' + INTERVAL (i * 7919) SECOND + INTERVAL (i) MICROSECOND AS a FROM range(500) t(i))
+SELECT bool_and({curve}_decode({curve}_encode([a, a - INTERVAL 1 DAY]::TIMESTAMP[2]), 'TIMESTAMP[2]') = [a, a - INTERVAL 1 DAY]) FROM v;
+----
+true
+
+query I
+WITH v AS (SELECT (i * 13.37 - 5000)::DECIMAL(9, 2) AS a, (i * -0.01)::DECIMAL(9, 2) AS b FROM range(500) t(i))
+SELECT bool_and({curve}_decode({curve}_encode(a, b), 'DECIMAL(9,2)[2]') = [a, b]) FROM v;
+----
+true
+
+query II
+SELECT {curve}_decode({curve}_encode(true, false, true), 'BOOLEAN[3]'),
+       {curve}_decode({curve}_encode('happy'::mood, 'sad'::mood), 'mood[2]');
+----
+[true, false, true]	[happy, sad]
+
+query I
+SELECT {curve}_decode({curve}_encode(TIME '23:59:59.999999', TIME '00:00:00'), 'TIME[2]');
+----
+['23:59:59.999999', '00:00:00']
+
+# Keys sort like the dates and timestamps they encode, including before 1970.
+query I
+WITH v AS (SELECT DATE '1960-01-01' + INTERVAL (i * 3) DAY AS d FROM range(10000) t(i)),
+k AS (SELECT d, {curve}_encode([d::DATE]::DATE[1]) AS k FROM v)
+SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY d) AS a, row_number() OVER (ORDER BY k) AS b FROM k) WHERE a <> b;
+----
+0
+
+query I
+WITH v AS (SELECT (i * 0.37 - 1000)::DECIMAL(12, 3) AS d FROM range(5000) t(i)),
+k AS (SELECT d, {curve}_encode([d]::DECIMAL(12, 3)[1]) AS k FROM v)
+SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY d) AS a, row_number() OVER (ORDER BY k) AS b FROM k) WHERE a <> b;
+----
+0
+
+# Range decomposition over dates, checked against every point.
+query II
+WITH r AS (SELECT * FROM {curve}_ranges([DATE '2024-01-10', DATE '2024-02-01'], [DATE '2024-01-20', DATE '2024-02-14'], 100000)),
+pts AS (SELECT a::DATE AS a, b::DATE AS b, {curve}_encode(a::DATE, b::DATE) AS k
+        FROM range(DATE '2024-01-01', DATE '2024-02-29', INTERVAL 1 DAY) x(a), range(DATE '2024-01-01', DATE '2024-02-29', INTERVAL 1 DAY) y(b)),
+c AS (SELECT a BETWEEN DATE '2024-01-10' AND DATE '2024-01-20' AND b BETWEEN DATE '2024-02-01' AND DATE '2024-02-14' AS inbox,
+             EXISTS (SELECT 1 FROM r WHERE k BETWEEN r.lo AND r.hi) AS covered FROM pts)
+SELECT count(*) FILTER (WHERE inbox AND NOT covered), count(*) FILTER (WHERE covered AND NOT inbox) FROM c;
+----
+0	0
+
+endloop
+
+# Errors
+statement error
+SELECT hilbert_encode('a', 'b');
+----
+hilbert_encode() only supports integer, FLOAT, DOUBLE, BOOLEAN, DATE, TIME, TIMESTAMP, DECIMAL (up to 18 digits) or ENUM coordinates, not VARCHAR
+
+statement error
+SELECT morton_encode(1::BIGINT, 2::BIGINT, 3::BIGINT);
+----
+morton_encode() supports at most 2 BIGINT coordinates, got 3
+
+statement error
+SELECT hilbert_encode([1.5]::DECIMAL(38, 2)[1]);
+----
+hilbert_encode() only supports arrays of integer, FLOAT, DOUBLE, BOOLEAN, DATE, TIME, TIMESTAMP, DECIMAL (up to 18 digits) or ENUM values, not DECIMAL(38,2)
+
+statement error
+SELECT hilbert_decode(1::UBIGINT, 'VARCHAR[2]');
+----
+hilbert_decode(): the target type must be a integer, FLOAT, DOUBLE, BOOLEAN, DATE, TIME, TIMESTAMP, DECIMAL (up to 18 digits) or ENUM type or a fixed-size array of one, not VARCHAR[2]
+
+statement error
+SELECT hilbert_decode(1::UBIGINT, 'BIGINT[3]');
+----
+hilbert_decode(): BIGINT keys hold 1-2 dimensions, got 3
+
+statement error
+SELECT hilbert_decode(65536::UINTEGER, 'UTINYINT[2]');
+----
+hilbert_decode: key 65536 is too large for UTINYINT[2]
+
+statement error
+SELECT hilbert_decode(2::UTINYINT, 'BOOLEAN');
+----
+hilbert_decode: key 2 does not decode to a valid BOOLEAN
+
+statement error
+SELECT hilbert_decode(1::UBIGINT, x) FROM (VALUES ('INTEGER[2]')) t(x);
+----
+hilbert_decode(): the target type must be a constant string such as 'DOUBLE[2]'

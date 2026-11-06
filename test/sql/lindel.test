@@ -1,6 +1,6 @@
 # name: test/sql/lindel.test
 # description: test lindel extension
-# group: [lindel]
+# group: [sql]
 
 # Before we load the extension, this will fail
 statement error
@@ -13,17 +13,17 @@ require lindel
 
 # Confirm the extension works
 query I
-SELECT hilbert_encode([1, 2, 3]::tinyint[3]);
+SELECT hilbert_encode([1, 2, 3]::utinyint[3]);
 ----
 22
 
 query I
-SELECT morton_encode([1, 2, 3]::tinyint[3]);
+SELECT morton_encode([1, 2, 3]::utinyint[3]);
 ----
 29
 
 query I
-select hilbert_decode(22::uinteger, 3, false, false)
+select hilbert_decode(22::uinteger, 3, false, true)
 ----
 [1, 2, 3]
 
@@ -34,10 +34,10 @@ with elements as (
 select
   a.id as a,
   b.id as b,
-  hilbert_encode([a.id, b.id]::tinyint[2]) as hilbert,
-  morton_encode([a.id, b.id]::tinyint[2]) as morton,
-  hilbert_decode(hilbert_encode([a.id, b.id]::tinyint[2]), 2, false, false) as hilbert_decoded,
-  morton_decode(morton_encode([a.id, b.id]::tinyint[2]), 2, false, false) as morton_decoded,
+  hilbert_encode([a.id, b.id]::utinyint[2]) as hilbert,
+  morton_encode([a.id, b.id]::utinyint[2]) as morton,
+  hilbert_decode(hilbert_encode([a.id, b.id]::utinyint[2]), 2, false, true) as hilbert_decoded,
+  morton_decode(morton_encode([a.id, b.id]::utinyint[2]), 2, false, true) as morton_decoded,
   from
 elements as a cross join elements as b order by a, b;
 ----
@@ -68,7 +68,7 @@ elements as a cross join elements as b order by a, b;
 4	4	32	48	[4, 4]	[4, 4]
 
 
-# Try to encode as integers.
+# Try to encode as 32-bit integers.
 
 query IIIIII
 with elements as (
@@ -77,10 +77,10 @@ with elements as (
 select
   a.id as a,
   b.id as b,
-  hilbert_encode([a.id, b.id]::int[2]) as hilbert,
-  morton_encode([a.id, b.id]::int[2]) as morton,
-  hilbert_decode(hilbert_encode([a.id, b.id]::int[2]), 2, false, false) as hilbert_decoded,
-  morton_decode(morton_encode([a.id, b.id]::int[2]), 2, false, false) as morton_decoded,
+  hilbert_encode([a.id, b.id]::uinteger[2]) as hilbert,
+  morton_encode([a.id, b.id]::uinteger[2]) as morton,
+  hilbert_decode(hilbert_encode([a.id, b.id]::uinteger[2]), 2, false, true) as hilbert_decoded,
+  morton_decode(morton_encode([a.id, b.id]::uinteger[2]), 2, false, true) as morton_decoded,
   from
 elements as a cross join elements as b order by a, b;
 ----
@@ -114,14 +114,26 @@ elements as a cross join elements as b order by a, b;
 # vector-type assertion because the bind returned UHUGEINT but the encode
 # function wrote a UBIGINT result for case 3 (issue #8).
 query I
-SELECT hilbert_encode([10, 20, 30]::INTEGER[3]);
+SELECT hilbert_encode([10, 20, 30]::UINTEGER[3]);
 ----
 11440
 
 query I
-SELECT morton_encode([10, 20, 30]::INTEGER[3]);
+SELECT morton_encode([10, 20, 30]::UINTEGER[3]);
 ----
 15080
+
+# Signed coordinates have their sign bit flipped before encoding (so keys sort like the
+# values), which puts small positive values in the upper half of each coordinate.
+query I
+SELECT hilbert_encode([10, 20, 30]::INTEGER[3]);
+----
+49517601571415210995964987680
+
+query I
+SELECT morton_encode([10, 20, 30]::INTEGER[3]);
+----
+69324642199981295394350971624
 
 query I
 SELECT morton_encode([1.0, 5.0, 6.0]::FLOAT[3]) > 0;
@@ -152,7 +164,13 @@ SELECT morton_encode([10, 20]::UINTEGER[2]);
 408
 
 # Round-trip through morton_decode (documented snippet, issue #9).
+# Signed coordinates decode with return_unsigned = false, unsigned with true.
 query I
-SELECT morton_decode(morton_encode([10, 20]::INTEGER[2]), 2, false, true);
+SELECT morton_decode(morton_encode([10, 20]::INTEGER[2]), 2, false, false);
+----
+[10, 20]
+
+query I
+SELECT morton_decode(morton_encode([10, 20]::UINTEGER[2]), 2, false, true);
 ----
 [10, 20]

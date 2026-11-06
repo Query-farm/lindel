@@ -1,0 +1,137 @@
+# name: test/sql/ranges.test
+# description: Decomposing box queries into curve key ranges
+# group: [sql]
+
+require lindel
+
+foreach curve hilbert morton
+
+# With a generous budget the ranges cover exactly the points in the box (checked against every
+# point of the 256 x 256 grid).
+foreach box [2,3]::UTINYINT[2],[10,12]::UTINYINT[2] [0,0]::UTINYINT[2],[255,0]::UTINYINT[2] [17,200]::UTINYINT[2],[130,255]::UTINYINT[2] [7,7]::UTINYINT[2],[7,7]::UTINYINT[2]
+
+query II
+WITH r AS (SELECT * FROM {curve}_ranges({box}, 1000000)),
+b AS (SELECT * FROM (SELECT {box}) t(lo_pt, hi_pt)),
+pts AS (SELECT x, y, {curve}_encode([x, y]::UTINYINT[2]) AS k FROM range(256) a(x), range(256) c(y)),
+c AS (
+  SELECT x BETWEEN b.lo_pt[1] AND b.hi_pt[1] AND y BETWEEN b.lo_pt[2] AND b.hi_pt[2] AS inbox,
+         EXISTS (SELECT 1 FROM r WHERE k BETWEEN r.lo AND r.hi) AS covered
+  FROM pts, b)
+SELECT count(*) FILTER (WHERE inbox AND NOT covered), count(*) FILTER (WHERE covered AND NOT inbox) FROM c;
+----
+0	0
+
+endloop
+
+# A small budget never drops a point in the box, and returns at most max_ranges ranges.
+query III
+WITH r AS (SELECT * FROM {curve}_ranges([2, 3]::UTINYINT[2], [100, 120]::UTINYINT[2], 4)),
+pts AS (SELECT x, y, {curve}_encode([x, y]::UTINYINT[2]) AS k FROM range(2, 101) a(x), range(3, 121) c(y))
+SELECT (SELECT count(*) FROM r) <= 4, (SELECT count(*) FROM r) > 1,
+       count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM r WHERE k BETWEEN r.lo AND r.hi))
+FROM pts;
+----
+true	true	0
+
+# Ranges are sorted, disjoint and not adjacent (adjacent ranges are merged).
+query I
+SELECT count(*) FROM (
+  SELECT lo, lag(hi) OVER (ORDER BY lo) AS prev_hi FROM {curve}_ranges([2, 3]::UTINYINT[2], [100, 120]::UTINYINT[2], 1000))
+WHERE prev_hi IS NOT NULL AND lo <= prev_hi + 1;
+----
+0
+
+# The whole grid is a single range covering every key.
+query II
+SELECT lo, hi FROM {curve}_ranges([0, 0]::UTINYINT[2], [255, 255]::UTINYINT[2]);
+----
+0	65535
+
+# Signed and floating point boxes that cross zero (the order-preserving mapping keeps them boxes).
+query II
+WITH r AS (SELECT * FROM {curve}_ranges([-5, -3]::INTEGER[2], [4, 6]::INTEGER[2], 100000)),
+pts AS (SELECT x, y, {curve}_encode([x, y]::INTEGER[2]) AS k FROM range(-20, 21) a(x), range(-20, 21) c(y)),
+c AS (SELECT x BETWEEN -5 AND 4 AND y BETWEEN -3 AND 6 AS inbox, EXISTS (SELECT 1 FROM r WHERE k BETWEEN r.lo AND r.hi) AS covered FROM pts)
+SELECT count(*) FILTER (WHERE inbox AND NOT covered), count(*) FILTER (WHERE covered AND NOT inbox) FROM c;
+----
+0	0
+
+query II
+WITH r AS (SELECT * FROM {curve}_ranges([-1.5, -2]::DOUBLE[2], [0.75, 2]::DOUBLE[2], 64)),
+pts AS (SELECT x / 4.0 AS x, y / 4.0 AS y, {curve}_encode([x / 4.0, y / 4.0]::DOUBLE[2]) AS k FROM range(-20, 21) a(x), range(-20, 21) c(y)),
+c AS (SELECT x BETWEEN -1.5 AND 0.75 AND y BETWEEN -2 AND 2 AS inbox, EXISTS (SELECT 1 FROM r WHERE k BETWEEN r.lo AND r.hi) AS covered FROM pts)
+SELECT count(*) FILTER (WHERE inbox AND NOT covered), (SELECT count(*) FROM r) <= 64 FROM c;
+----
+0	true
+
+# Three dimensions, exact.
+query II
+WITH r AS (SELECT * FROM {curve}_ranges([1, 2, 0]::TINYINT[3], [5, 3, 7]::TINYINT[3], 100000)),
+pts AS (SELECT x, y, z, {curve}_encode([x, y, z]::TINYINT[3]) AS k FROM range(-2, 9) a(x), range(-2, 9) c(y), range(-2, 9) d(z)),
+c AS (SELECT x BETWEEN 1 AND 5 AND y BETWEEN 2 AND 3 AND z BETWEEN 0 AND 7 AS inbox, EXISTS (SELECT 1 FROM r WHERE k BETWEEN r.lo AND r.hi) AS covered FROM pts)
+SELECT count(*) FILTER (WHERE inbox AND NOT covered), count(*) FILTER (WHERE covered AND NOT inbox) FROM c;
+----
+0	0
+
+# The ranges can drive a join against encoded points.
+query I
+WITH pts AS (SELECT x, y, {curve}_encode([x, y]::UTINYINT[2]) AS k FROM range(50) a(x), range(50) c(y))
+SELECT count(*) FROM pts p, {curve}_ranges([10, 20]::UTINYINT[2], [19, 24]::UTINYINT[2], 16) r
+WHERE p.k BETWEEN r.lo AND r.hi AND p.x BETWEEN 10 AND 19 AND p.y BETWEEN 20 AND 24;
+----
+50
+
+# Bounded: exact at cell resolution — the ranges hold exactly as many keys as cells in the box, and
+# every point whose value lies in the box is covered.
+query II
+WITH r AS (SELECT * FROM {curve}_ranges_bounded([10, 10], [20, 30], [0, 0], [100, 100], 8, 100000)),
+pts AS (SELECT x / 2.0 AS x, y / 2.0 AS y FROM range(0, 201) a(x), range(0, 201) c(y)),
+inbox AS (SELECT {curve}_encode_bounded([x, y]::DOUBLE[2], [0, 0], [100, 100], 8) AS k FROM pts WHERE x BETWEEN 10 AND 20 AND y BETWEEN 10 AND 30)
+SELECT (SELECT sum(hi - lo + 1) FROM r),
+       (SELECT count(*) FROM inbox WHERE NOT EXISTS (SELECT 1 FROM r WHERE k BETWEEN r.lo AND r.hi));
+----
+1404	0
+
+query I
+SELECT typeof(lo) FROM {curve}_ranges_bounded([10, 10], [20, 30], [0, 0], [100, 100], 8) LIMIT 1;
+----
+USMALLINT
+
+endloop
+
+# Errors
+statement error
+SELECT * FROM hilbert_ranges([5, 0]::UTINYINT[2], [4, 9]::UTINYINT[2]);
+----
+hilbert_ranges(): min_point must not exceed max_point (dimension 1)
+
+statement error
+SELECT * FROM morton_ranges([0, 0]::UTINYINT[2], [4, 9]::INTEGER[2]);
+----
+morton_ranges(): min_point and max_point must have the same type
+
+statement error
+SELECT * FROM hilbert_ranges([0, 0]::UTINYINT[2], [4, 9]::UTINYINT[2], 0);
+----
+hilbert_ranges(): max_ranges must be at least 1, got 0
+
+statement error
+SELECT * FROM hilbert_ranges(['a']::VARCHAR[1], ['b']::VARCHAR[1]);
+----
+hilbert_ranges(): points must be arrays of integer, FLOAT, DOUBLE
+
+statement error
+SELECT * FROM hilbert_ranges([0, NULL]::INTEGER[2], [4, 9]::INTEGER[2]);
+----
+hilbert_ranges(): points can not contain NULL values
+
+statement error
+SELECT * FROM morton_ranges_bounded([10, 10], [20, 30], [0, 0], [100, 100], 0);
+----
+morton_ranges_bounded() bits must be between 1 and 64, got 0
+
+statement error
+SELECT * FROM morton_ranges_bounded([10, 10], [20, 30, 1], [0, 0], [100, 100], 8);
+----
+morton_ranges_bounded(): all four arrays must have the same number of dimensions

@@ -1,0 +1,163 @@
+# name: test/sql/bounded.test
+# description: Bounded (quantized) and latitude/longitude encoding
+# group: [sql]
+
+require lindel
+
+foreach curve hilbert morton
+
+# The key is the narrowest unsigned type holding dimensions * bits bits.
+query IIIII
+SELECT typeof({curve}_encode_bounded([0.5]::DOUBLE[1], [0], [1], 8)),
+       typeof({curve}_encode_bounded([0.5, 0.5]::DOUBLE[2], [0, 0], [1, 1], 10)),
+       typeof({curve}_encode_bounded([0.5, 0.5]::DOUBLE[2], [0, 0], [1, 1], 16)),
+       typeof({curve}_encode_bounded([0.5, 0.5, 0.5]::DOUBLE[3], [0, 0, 0], [1, 1, 1], 21)),
+       typeof({curve}_encode_bounded([0.5, 0.5, 0.5, 0.5]::DOUBLE[4], [0, 0, 0, 0], [1, 1, 1, 1], 32));
+----
+UTINYINT	UINTEGER	UINTEGER	UBIGINT	UHUGEINT
+
+# Every cell of a full grid gets a distinct key in 0 .. 2^(dimensions * bits) - 1.
+query III
+SELECT count(DISTINCT k), min(k), max(k) FROM (
+  SELECT {curve}_encode_bounded([x + 0.5, y + 0.5]::DOUBLE[2], [0, 0], [16, 16], 4) AS k
+  FROM range(16) a(x), range(16) b(y));
+----
+256	0	255
+
+query III
+SELECT count(DISTINCT k), min(k), max(k) FROM (
+  SELECT {curve}_encode_bounded([x + 0.5, y + 0.5, z + 0.5]::DOUBLE[3], [0, 0, 0], [8, 8, 8], 3) AS k
+  FROM range(8) a(x), range(8) b(y), range(8) c(z));
+----
+512	0	511
+
+# Decoding returns the cell centre: within half a cell of the input, and re-encoding gives the same key.
+query II
+WITH pts AS (
+  SELECT [x * 3.7 - 50, y * 1.3 + 7]::DOUBLE[2] AS p FROM range(30) a(x), range(30) b(y)),
+r AS (
+  SELECT p, {curve}_encode_bounded(p, [-60, 0], [80, 50], 12) AS k FROM pts),
+d AS (
+  SELECT p, k, {curve}_decode_bounded(k, [-60, 0]::DOUBLE[2], [80, 50]::DOUBLE[2], 12) AS c FROM r)
+SELECT bool_and(abs(p[1] - c[1]) <= 140 / 4096 / 2 AND abs(p[2] - c[2]) <= 50 / 4096 / 2),
+       bool_and({curve}_encode_bounded(c, [-60, 0], [80, 50], 12) = k)
+FROM d;
+----
+true	true
+
+# Values outside the bounds are clamped to the edge cells.
+query II
+SELECT {curve}_encode_bounded([-5, 200]::DOUBLE[2], [0, 0], [100, 100], 8) = {curve}_encode_bounded([0, 100]::DOUBLE[2], [0, 0], [100, 100], 8),
+       {curve}_encode_bounded(['-inf', 'inf']::DOUBLE[2], [0, 0], [100, 100], 8) = {curve}_encode_bounded([0, 100]::DOUBLE[2], [0, 0], [100, 100], 8);
+----
+true	true
+
+# Bounds can differ per row.
+query I
+WITH t AS (SELECT [x, x]::DOUBLE[2] AS v, [x - 1, x - 1]::DOUBLE[2] AS lo, [x + 1, x + 1]::DOUBLE[2] AS hi FROM range(100) r(x))
+SELECT count(DISTINCT {curve}_encode_bounded(v, lo, hi, 8)) FROM t;
+----
+1
+
+# Integer arrays are accepted for the coordinates, and NULL inputs give NULL.
+query III
+SELECT {curve}_encode_bounded([5, 5]::INTEGER[2], [0, 0], [10, 10], 4) = {curve}_encode_bounded([5.0, 5.0]::DOUBLE[2], [0, 0], [10, 10], 4),
+       {curve}_encode_bounded(NULL::DOUBLE[2], [0, 0], [10, 10], 4) IS NULL,
+       {curve}_decode_bounded(NULL::UINTEGER, [0, 0]::DOUBLE[2], [10, 10]::DOUBLE[2], 4) IS NULL;
+----
+true	true	true
+
+# 64 bits per dimension is supported for one or two dimensions.
+query I
+SELECT typeof({curve}_encode_bounded([0.25, 0.75]::DOUBLE[2], [0, 0], [1, 1], 64));
+----
+UHUGEINT
+
+# Latitude/longitude: 32 bits per axis by default (a UBIGINT key), decoding to the cell centre.
+query IIII
+WITH k AS (SELECT {curve}_encode_latlon(52.52, 13.405) AS k)
+SELECT typeof(k), abs({curve}_decode_latlon(k).lat - 52.52) < 1e-7, abs({curve}_decode_latlon(k).lon - 13.405) < 1e-7,
+       typeof({curve}_encode_latlon(52.52, 13.405, 16))
+FROM k;
+----
+UBIGINT	true	true	UINTEGER
+
+query II
+WITH pts AS (SELECT lat, lon FROM (VALUES (-90.0, -180.0), (90.0, 180.0), (0.0, 0.0), (-33.86, 151.21), (40.71, -74.01)) t(lat, lon))
+SELECT bool_and(abs(d.lat - lat) <= 180 / 65536 / 2 AND abs(d.lon - lon) <= 360 / 65536 / 2), count(*)
+FROM (SELECT lat, lon, {curve}_decode_latlon({curve}_encode_latlon(lat, lon, 16), 16) AS d FROM pts);
+----
+true	5
+
+query II
+SELECT {curve}_encode_latlon(NULL, 1.0) IS NULL, {curve}_decode_latlon(NULL) IS NULL;
+----
+true	true
+
+# GEOMETRY values encode the centre of their bounding box with 2-D bounds; empty geometries give NULL.
+query IIII
+SELECT {curve}_encode_bounded('POINT (12.5 40.25)'::GEOMETRY, [0, 0], [100, 100], 16) = {curve}_encode_bounded([12.5, 40.25]::DOUBLE[2], [0, 0], [100, 100], 16),
+       {curve}_encode_bounded('POLYGON ((10 10, 20 10, 20 30, 10 30, 10 10))'::GEOMETRY, [0, 0], [100, 100], 16) = {curve}_encode_bounded([15, 20]::DOUBLE[2], [0, 0], [100, 100], 16),
+       {curve}_encode_bounded('POINT EMPTY'::GEOMETRY, [0, 0], [100, 100], 16) IS NULL,
+       {curve}_encode_bounded(NULL::GEOMETRY, [0, 0], [100, 100], 16) IS NULL;
+----
+true	true	true	true
+
+query I
+WITH g AS (SELECT format('LINESTRING ({} {}, {} {})', x, y, x + 2, y + 4)::GEOMETRY AS geom, x + 1 AS cx, y + 2 AS cy FROM range(0, 90, 7) a(x), range(0, 90, 11) b(y))
+SELECT bool_and({curve}_encode_bounded(geom, [0, 0], [100, 100], 12) = {curve}_encode_bounded([cx, cy]::DOUBLE[2], [0, 0], [100, 100], 12)) FROM g;
+----
+true
+
+endloop
+
+# Errors
+statement error
+SELECT hilbert_encode_bounded(['nan'::DOUBLE, 1]::DOUBLE[2], [0, 0], [10, 10], 4);
+----
+hilbert_encode_bounded: cannot encode NaN
+
+statement error
+SELECT hilbert_encode_bounded([1, 1]::DOUBLE[2], [0, 0], [10, 10], 0);
+----
+hilbert_encode_bounded() bits must be between 1 and 64, got 0
+
+statement error
+SELECT morton_encode_bounded([1, 1]::DOUBLE[2], [0, 0], [10, 10], 65);
+----
+morton_encode_bounded() bits must be between 1 and 64, got 65
+
+statement error
+SELECT hilbert_encode_bounded([1, 1, 1]::DOUBLE[3], [0, 0, 0], [10, 10, 10], 40);
+----
+hilbert_encode_bounded() supports at most 32 bits per dimension with 3 dimensions, got 40
+
+statement error
+SELECT hilbert_encode_bounded([1, 1]::DOUBLE[2], [0, 5], [10, 5], 8);
+----
+hilbert_encode_bounded: max must be greater than min for dimension 2
+
+statement error
+SELECT hilbert_encode_bounded([1, 1]::DOUBLE[2], [0, 0], [10, 'inf'::DOUBLE], 8);
+----
+hilbert_encode_bounded: bounds for dimension 2 must be finite
+
+statement error
+SELECT hilbert_encode_bounded([1, 1]::DOUBLE[2], [0, 0], [10, 10], x) FROM range(8, 9) t(x);
+----
+hilbert_encode_bounded(): bits must be a constant
+
+statement error
+SELECT hilbert_decode_bounded(256::UINTEGER, [0, 0]::DOUBLE[2], [10, 10]::DOUBLE[2], 4);
+----
+hilbert_decode_bounded: key 256 is too large for 2 dimensions of 4 bits
+
+statement error
+SELECT hilbert_encode_latlon(91.0, 0.0);
+----
+hilbert_encode_latlon: latitude 91.000000 is outside [-90.000000, 90.000000]
+
+statement error
+SELECT morton_encode_latlon(0.0, -180.5);
+----
+morton_encode_latlon: longitude -180.500000 is outside [-180.000000, 180.000000]
